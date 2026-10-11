@@ -724,7 +724,13 @@ func (p *Parser) completeConflictReduceFrontier(source []byte, s *glrStack, tok 
 		if maxLiveStacks <= 0 {
 			return true
 		}
-		return liveStacks+len(p.pendingFrontierForkStacks)+len(p.pendingForkStacks) < maxLiveStacks
+		if liveStacks+len(p.pendingFrontierForkStacks)+len(p.pendingForkStacks) >= maxLiveStacks {
+			if p.mergeScratch != nil {
+				p.mergeScratch.policyPruned = true
+			}
+			return false
+		}
+		return true
 	}
 	if seed.action.Type != ParseActionReduce || seed.beforeDepth == 0 || seed.afterDepth == 0 {
 		return
@@ -4017,6 +4023,9 @@ func (p *Parser) selectedReduceWindowsFromGSSWithBudget(arena *nodeArena, act Pa
 		return nil, 0, false
 	}
 	if workBudget <= 0 {
+		if p.mergeScratch != nil {
+			p.mergeScratch.policyPruned = true
+		}
 		return nil, 0, true
 	}
 
@@ -4036,6 +4045,9 @@ func (p *Parser) selectedReduceWindowsFromGSSWithBudget(arena *nodeArena, act Pa
 				continue
 			}
 			preference := p.reduceForkWindowPreference(arena, act, fork, forks[i])
+			if preference != 0 && p.mergeScratch != nil {
+				p.mergeScratch.policyPruned = true
+			}
 			if workCountInstrumentationEnabled && preference != 0 {
 				workCountTopologyRecordChildElection(s, forks[i], fork, preference) // work-count-assembly: topology child-election seam
 			}
@@ -4057,6 +4069,8 @@ func (p *Parser) selectedReduceWindowsFromGSSWithBudget(arena *nodeArena, act Pa
 		}
 		if insertAt >= 0 || len(forks) < maxGroups {
 			forks = insertReduceFork(forks, insertAt, fork)
+		} else if p.mergeScratch != nil {
+			p.mergeScratch.policyPruned = true
 		}
 	}
 
@@ -4111,6 +4125,9 @@ func (p *Parser) selectedReduceWindowsFromGSSWithBudget(arena *nodeArena, act Pa
 	}
 
 	dfs(s.gss.head, childCount)
+	if capped && p.mergeScratch != nil {
+		p.mergeScratch.policyPruned = true
+	}
 	workCountRecordReduceWindow(p, s, len(forks), work, workBudget, capped)
 	return forks, work, capped
 }
@@ -4670,6 +4687,9 @@ func (p *Parser) applyReduceActionForked(source []byte, s *glrStack, act ParseAc
 				end++
 			}
 			group := allForks[start:end]
+			if len(group) > 1 && p.mergeScratch != nil {
+				p.mergeScratch.policyPruned = true
+			}
 			selected := 0
 			for i := 1; i < len(group); i++ {
 				if p.reduceForkWindowPreference(arena, act, group[i], group[selected]) < 0 {
@@ -4684,6 +4704,9 @@ func (p *Parser) applyReduceActionForked(source []byte, s *glrStack, act ParseAc
 		forks = p.selectedReduceWindowsFromGSS(arena, act, s, int(act.ChildCount), maxStacksPerMergeKey)
 	}
 	if limit := p.cRecoveryReductionForkLimit; limit > 0 && len(forks) > limit {
+		if p.mergeScratch != nil {
+			p.mergeScratch.policyPruned = true
+		}
 		forks = forks[:limit]
 		if packedGroups != nil {
 			packedGroups = packedGroups[:limit]

@@ -16,6 +16,16 @@ import editor_latency_gate as gate
 
 
 class HostedCampaignTests(unittest.TestCase):
+    def test_lane_cache_scratch_and_unique_image(self):
+        environment = {"GOCACHE": "/cache", "GOTMPDIR": "/go-tmp", "TMPDIR": "/tmp-dir", "GTS_EDITOR_LATENCY_IMAGE": "gotreesitter/test:unique"}
+        with mock.patch.dict(os.environ, environment, clear=True):
+            command = gate.campaign_docker_command(Path("/repo"), Path("/base"), Path("/out"), 1)
+            self.assertIn("gotreesitter/test:unique", command)
+            for mount in ("/cache:/lane-go-cache", "/go-tmp:/lane-go-tmp", "/tmp-dir:/lane-tmp"):
+                self.assertIn(mount, command)
+            self.assertIn("--no-chown", command)
+            self.assertEqual(gate.campaign_go_environment(), "export GOCACHE=/lane-go-cache; export GOTMPDIR=/lane-go-tmp; export TMPDIR=/lane-tmp")
+
     def test_hosted_and_dedicated_limits_apply_to_same_paired_container(self):
         for environment, memory, gomemlimit in (
             ({}, "8g", "6GiB"),
@@ -33,6 +43,32 @@ class HostedCampaignTests(unittest.TestCase):
         command = gate.campaign_harness_command(Path("/repo"), Path("/out")) + ["--build-only"]
         self.assertEqual(command, ["bash", Path("/repo/cgo_harness/docker/run_parity_in_docker.sh"),
             "--out-root", Path("/out/harness"), "--build-only"])
+
+
+class WorkExemptionHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.rows = [{"fixture_sha256": "digest", "cell": "cell", "class": "delete", "value": 30, "ceiling": 20, "expires_at_certificate": 2}]
+
+    def test_unchanged_and_removals(self):
+        gate.check_work_exemptions_shrink(self.rows, copy.deepcopy(self.rows))
+        gate.check_work_exemptions_shrink(self.rows, [])
+
+    def test_additions_readditions_and_substitutions_fail(self):
+        for before, after in (([], self.rows), (self.rows, self.rows + [dict(self.rows[0], cell="other")]),
+                              (self.rows, [dict(self.rows[0], cell="other")])):
+            with self.subTest(before=before, after=after), self.assertRaises(ValueError):
+                gate.check_work_exemptions_shrink(before, after)
+
+    def test_every_receipt_field_is_immutable(self):
+        for field in self.rows[0]:
+            changed = copy.deepcopy(self.rows)
+            changed[0][field] = "changed"
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                gate.check_work_exemptions_shrink(self.rows, changed)
+
+    def test_duplicates_fail(self):
+        with self.assertRaises(ValueError):
+            gate.check_work_exemptions_shrink(self.rows, self.rows * 2)
 
 
 class CampaignLockTests(unittest.TestCase):

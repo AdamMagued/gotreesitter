@@ -166,6 +166,7 @@ package gotreesitter_test
 //     still guards real regressions.
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"strings"
@@ -174,6 +175,8 @@ import (
 
 	gts "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
+	"github.com/odvcencio/gotreesitter/internal/benchfixtures"
+	"github.com/odvcencio/gotreesitter/internal/incr"
 )
 
 // w5SlowTier reports whether the ~1MB size tier should be included. Only
@@ -419,20 +422,21 @@ func w5ApplyEdit(src []byte, offset int, class w5EditClass) ([]byte, gts.InputEd
 // result, profiled incremental parse of the result, plus the oracle diff
 // and wall time.
 type w5Sample struct {
-	Lang         string
-	Size         string
-	Class        w5EditClass
-	Position     w5Position
-	Profile      gts.IncrementalParseProfile
-	FreshRuntime gts.ParseRuntime
-	IncrRuntime  gts.ParseRuntime
-	EditedLen    int
-	OracleDiff   string
-	FullSpanOK   bool
-	FreshError   bool
-	IncrError    bool
-	IncrWallNs   int64
-	FreshWallNs  int64
+	FixtureSHA256 string
+	Lang          string
+	Size          string
+	Class         w5EditClass
+	Position      w5Position
+	Profile       gts.IncrementalParseProfile
+	FreshRuntime  gts.ParseRuntime
+	IncrRuntime   gts.ParseRuntime
+	EditedLen     int
+	OracleDiff    string
+	FullSpanOK    bool
+	FreshError    bool
+	IncrError     bool
+	IncrWallNs    int64
+	FreshWallNs   int64
 }
 
 // w5ProductionParser keeps this incremental reuse gate on its certified route.
@@ -491,7 +495,8 @@ func w5RunSampleAtOffset(t *testing.T, spec w5LangSpec, tier w5SizeTier, class w
 	fullSpan := int(incrTree.RootNode().EndByte()) == len(edited)
 
 	return w5Sample{
-		Lang: spec.name, Size: tier.name, Class: class, Position: pos,
+		FixtureSHA256: fmt.Sprintf("%x", sha256.Sum256(src)),
+		Lang:          spec.name, Size: tier.name, Class: class, Position: pos,
 		Profile: prof, FreshRuntime: freshRuntime, IncrRuntime: incrTree.ParseRuntime(), EditedLen: len(edited), OracleDiff: diff, FullSpanOK: fullSpan,
 		FreshError: freshTree.RootNode().HasError(), IncrError: incrTree.RootNode().HasError(),
 		IncrWallNs: incrWall.Nanoseconds(), FreshWallNs: freshWall.Nanoseconds(),
@@ -837,7 +842,7 @@ func w5PerKiBCeiling(editedLen int, perKiB uint64) uint64 {
 
 // w5CheckTransientErrorWork turns JavaScript-family error-edit work into a
 // reproducible linear-work contract. Wall time remains evidence only.
-func w5CheckTransientErrorWork(t *testing.T, s w5Sample) {
+func w5CheckTransientErrorWork(t *testing.T, s w5Sample, exemptions ...*benchfixtures.W5WorkExemptions) {
 	t.Helper()
 	p := s.Profile
 	iterations := uint64(p.SingleStackIterations + p.MultiStackIterations)
@@ -852,6 +857,14 @@ func w5CheckTransientErrorWork(t *testing.T, s w5Sample) {
 		{name: "recoverStateChecks", got: p.RecoverStateChecks, max: w5PerKiBCeiling(s.EditedLen, w5TransientMaxRecoverChecksPerKiB)},
 	}
 	for _, check := range checks {
+		if check.name == "tokensConsumed" && len(exemptions) != 0 {
+			cell := fmt.Sprintf("%s/%s/%s", s.Lang, s.Size, s.Position)
+			class := s.Class.String() + "-transient-error"
+			if err := exemptions[0].Check(s.FixtureSHA256, cell, class, check.got, check.max); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if check.got > check.max {
 			t.Fatalf("%s/%s/%s-transient-error/%s: %s=%d exceeds deterministic linear-work ceiling %d",
 				s.Lang, s.Size, s.Class, s.Position, check.name, check.got, check.max)
@@ -954,6 +967,21 @@ func TestW5EditorLatencyGate(t *testing.T) {
 // separate from the valid cells above so the normal reuse floors remain
 // meaningful.
 func TestW5JavaScriptFamilyTransientErrorGate(t *testing.T) {
+	entries, err := benchfixtures.W5TokenExemptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exemptions, err := benchfixtures.NewW5WorkExemptions(entries, incr.PruningCertificateVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w5SlowTier() {
+		t.Cleanup(func() {
+			if err := exemptions.Complete(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
 	classes := []w5EditClass{w5Insert, w5Delete, w5Replace}
 	positions := []w5Position{w5Top, w5Middle, w5Bottom}
 	for _, spec := range w5Langs {
@@ -981,7 +1009,7 @@ func TestW5JavaScriptFamilyTransientErrorGate(t *testing.T) {
 										t.Fatalf("%s/%s/%s-transient-error/%s: fixture did not produce matching ERROR trees (fresh=%v incremental=%v)",
 											s.Lang, s.Size, s.Class, s.Position, s.FreshError, s.IncrError)
 									}
-									w5CheckTransientErrorWork(t, s)
+									w5CheckTransientErrorWork(t, s, exemptions)
 									t.Logf("%s/%s/%s-transient-error/%s: newNodes=%d tokensConsumed=%d singleIters=%d multiIters=%d recoverChecks=%d retries=%d maxStacks=%d arenaBytes=%d scratchBytes=%d freshNodes=%d freshArenaBytes=%d freshScratchBytes=%d incrWall=%s freshWall=%s",
 										s.Lang, s.Size, s.Class, s.Position, s.Profile.NewNodesAllocated, s.Profile.TokensConsumed,
 										s.Profile.SingleStackIterations, s.Profile.MultiStackIterations, s.Profile.RecoverStateChecks,

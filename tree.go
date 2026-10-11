@@ -4997,7 +4997,7 @@ func (t *Tree) hasCertifiedIncrementalReuse() bool {
 }
 
 func (t *Tree) hasCertifiedUnprunedPolicy() bool {
-	return t != nil && t.arena != nil && t.arena.legacyNoPolicyPruning
+	return incr.PruningCertificateVersion == 1 && t != nil && t.arena != nil && t.arena.legacyNoPolicyPruning
 }
 
 // rawParseRuntime returns the parser-captured runtime record without running

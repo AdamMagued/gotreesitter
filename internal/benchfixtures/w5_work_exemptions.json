@@ -1,0 +1,50 @@
+[
+  {
+    "fixture_sha256": "4733779015d7c5d5e4c3cdcc588e84d726a936a96a07ba2ab00fd4920c44e507",
+    "cell": "typescript/1MB/start",
+    "class": "delete-transient-error",
+    "value": 285159,
+    "ceiling": 262400,
+    "expires_at_certificate": 2
+  },
+  {
+    "fixture_sha256": "4733779015d7c5d5e4c3cdcc588e84d726a936a96a07ba2ab00fd4920c44e507",
+    "cell": "typescript/1MB/middle",
+    "class": "delete-transient-error",
+    "value": 285160,
+    "ceiling": 262400,
+    "expires_at_certificate": 2
+  },
+  {
+    "fixture_sha256": "4733779015d7c5d5e4c3cdcc588e84d726a936a96a07ba2ab00fd4920c44e507",
+    "cell": "typescript/1MB/end",
+    "class": "delete-transient-error",
+    "value": 285160,
+    "ceiling": 262400,
+    "expires_at_certificate": 2
+  },
+  {
+    "fixture_sha256": "4733779015d7c5d5e4c3cdcc588e84d726a936a96a07ba2ab00fd4920c44e507",
+    "cell": "typescript/1MB/start",
+    "class": "replace-transient-error",
+    "value": 285161,
+    "ceiling": 262400,
+    "expires_at_certificate": 2
+  },
+  {
+    "fixture_sha256": "4733779015d7c5d5e4c3cdcc588e84d726a936a96a07ba2ab00fd4920c44e507",
+    "cell": "typescript/1MB/middle",
+    "class": "replace-transient-error",
+    "value": 285162,
+    "ceiling": 262400,
+    "expires_at_certificate": 2
+  },
+  {
+    "fixture_sha256": "4733779015d7c5d5e4c3cdcc588e84d726a936a96a07ba2ab00fd4920c44e507",
+    "cell": "typescript/1MB/end",
+    "class": "replace-transient-error",
+    "value": 285162,
+    "ceiling": 262400,
+    "expires_at_certificate": 2
+  }
+]

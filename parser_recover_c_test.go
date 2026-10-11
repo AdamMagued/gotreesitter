@@ -3051,7 +3051,7 @@ func TestCCondenseAndResumeComparesMissingGroupStacks(t *testing.T) {
 			{Name: "item", Visible: true, Named: true},
 		},
 	}
-	parser := &Parser{language: lang, errorCostCompetition: true}
+	parser := &Parser{language: lang, errorCostCompetition: true, mergeScratch: &glrMergeScratch{}}
 	clean := makeCCondenseMissingGroupTestStack(7, 4, false)
 	missing := makeCCondenseMissingGroupTestStack(7, 4, true)
 	missing.cRecoverMissingGroup = &cRecGroup{}
@@ -3075,6 +3075,9 @@ func TestCCondenseAndResumeComparesMissingGroupStacks(t *testing.T) {
 	}
 	if condensed[0].cRecoverMissingGroup != nil {
 		t.Fatal("condense kept missing-group stack; want lower-cost clean stack")
+	}
+	if !parser.mergeScratch.policyPruned {
+		t.Fatal("recovery cost discard certified as unpruned")
 	}
 }
 

@@ -450,6 +450,54 @@ func buildWideGLRAmbiguousLanguage(t *testing.T) *gts.Language {
 	return lang
 }
 
+func TestPrunedLargeIncrementalRecoveryMatchesFresh(t *testing.T) {
+	for _, audit := range []bool{false, true} {
+		t.Run(map[bool]string{false: "audit_off", true: "audit_on"}[audit], func(t *testing.T) {
+			gts.EnableRuntimeAudit(audit)
+			defer gts.EnableRuntimeAudit(false)
+			lang := buildWideGLRAmbiguousLanguage(t)
+			parser := gts.NewParser(lang)
+			parser.SetAdmissionCandidateRoute(false)
+			// Few tokens keep the witness small while its byte length reaches
+			// the large-input recovery certification path.
+			source := []byte(strings.Repeat(" ", 512*1024) + strings.Repeat("1+", 16) + "1")
+			old, err := parser.Parse(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer old.Release()
+			if old.ParseRuntime().MaxStacksSeen <= 8 {
+				t.Fatalf("fixture did not reach pruning pressure: %d stacks", old.ParseRuntime().MaxStacksSeen)
+			}
+			at := uint32(len(source) - 1)
+			old.Edit(gts.InputEdit{StartByte: at, OldEndByte: at + 1, NewEndByte: at,
+				StartPoint: gts.Point{Column: at}, OldEndPoint: gts.Point{Column: at + 1}, NewEndPoint: gts.Point{Column: at}})
+			edited := source[:at]
+			result, err := parser.ParseIncremental(edited, old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer result.Release()
+			freshParser := gts.NewParser(lang)
+			freshParser.SetAdmissionCandidateRoute(false)
+			fresh, err := freshParser.Parse(edited)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fresh.Release()
+			if !fresh.RootNode().HasError() {
+				t.Fatal("edit did not produce a recovery result")
+			}
+			if diff := issue454FirstDivergence(lang, fresh.RootNode(), result.RootNode()); diff != nil {
+				t.Fatal(diff)
+			}
+			if result.ParseStopReason() != fresh.ParseStopReason() || result.RootNode().EndByte() != uint32(len(edited)) {
+				t.Fatal("incremental recovery changed completion or input coverage")
+			}
+		})
+	}
+}
+
 // TestAdmissionSwitchCompactMemoryBudgetPeakFootprintBoundedOnWideGLR is the
 // pathological-wide-GLR half of the overshoot bound (c): a genuinely
 // ambiguous input (see buildWideGLRAmbiguousLanguage), under the same tiny

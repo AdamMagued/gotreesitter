@@ -4369,6 +4369,9 @@ func (p *Parser) cRecover(stacks *[]glrStack, v *glrStack, source []byte, tok To
 	// drop the absorbing version. Count the group as ONE version (C keeps the
 	// absorbing paths inside a single merged version).
 	if didRecover && p.cEffectiveVersionCount(*stacks, rec.group) > cRecoverMaxVersionCount {
+		if p.mergeScratch != nil {
+			p.mergeScratch.policyPruned = true
+		}
 		v.dead = true
 		return cRecHalted, forked, ParseStopNone
 	}
@@ -4419,6 +4422,9 @@ func (p *Parser) cRecover(stacks *[]glrStack, v *glrStack, source []byte, tok To
 		return cRecHalted, forked, reason
 	}
 	if vIndex >= 0 && p.cBetterVersionExists(*stacks, vIndex, false, newCost, false, tok) {
+		if p.mergeScratch != nil {
+			p.mergeScratch.policyPruned = true
+		}
 		v.dead = true
 		return cRecHalted, forked, ParseStopNone
 	}
@@ -5470,6 +5476,9 @@ func (p *Parser) cCondenseAndResume(stacks []glrStack, source []byte, ts TokenSo
 			}
 			switch p.cCompareCondenseVersions(statusJ, statusI, &stacks[j], comparisonStack) {
 			case cErrorComparisonTakeLeft:
+				if p.mergeScratch != nil {
+					p.mergeScratch.policyPruned = true
+				}
 				if p.glrTrace {
 					p.traceCCondenseDrop("take-left", i, j, stacks[i], stacks[j],
 						p.cVersionStatusForTrace(&stacks[i], statusI),
@@ -5508,6 +5517,9 @@ func (p *Parser) cCondenseAndResume(stacks []glrStack, source []byte, ts TokenSo
 					}
 				}
 			case cErrorComparisonTakeRight:
+				if p.mergeScratch != nil {
+					p.mergeScratch.policyPruned = true
+				}
 				if p.glrTrace {
 					p.traceCCondenseDrop("take-right", j, i, stacks[j], stacks[i],
 						p.cVersionStatusForTrace(&stacks[j], statusJ),
@@ -5574,6 +5586,9 @@ func (p *Parser) cCondenseAndResume(stacks []glrStack, source []byte, ts TokenSo
 			key := p.cCondenseVersionKeyFor(&stacks[i])
 			if cCondenseVersionRankFor(keyRanks, key) < cRecoverMaxVersionCount {
 				continue
+			}
+			if p.mergeScratch != nil {
+				p.mergeScratch.policyPruned = true
 			}
 			if p.glrTrace {
 				p.traceCCondenseTrim(i, stacks[i])
@@ -5662,6 +5677,9 @@ func (p *Parser) cCondenseAndResume(stacks []glrStack, source []byte, ts TokenSo
 			}
 			hasUnpaused = true
 			continue
+		}
+		if p.mergeScratch != nil {
+			p.mergeScratch.policyPruned = true
 		}
 		if workCountInstrumentationEnabled {
 			workCountTopologyRetireVersion(&stacks[i])

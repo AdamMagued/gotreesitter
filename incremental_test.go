@@ -1,8 +1,10 @@
 package gotreesitter
 
 import (
+	"fmt"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/odvcencio/gotreesitter/internal/incr"
 )
@@ -1270,5 +1272,137 @@ func TestIncrementalFreshVerifierInheritsActiveDeadline(t *testing.T) {
 	defer tree.Release()
 	if tree.ParseStopReason() != ParseStopTimeout {
 		t.Fatalf("verifier restarted its deadline: %s", tree.ParseStopReason())
+	}
+}
+
+func pruningCertificateStacks(n int, sameKey bool) []glrStack {
+	stacks := make([]glrStack, n)
+	for i := range stacks {
+		state := StateID(42)
+		if !sameKey {
+			state += StateID(i)
+		}
+		stacks[i] = glrStack{entries: []stackEntry{{state: StateID(100 + i)}, {state: state}}}
+	}
+	return stacks
+}
+
+func TestPruningCertificateDiscards(t *testing.T) {
+	for _, audit := range []bool{false, true} {
+		for _, tc := range []struct {
+			name  string
+			keep  int
+			prune func(*parserScratch) []glrStack
+		}{
+			{"global_cull", 3, func(s *parserScratch) []glrStack {
+				return (&Parser{}).cullParseStacksForIteration(pruningCertificateStacks(8, false), s, arenaClassFull, 3, 3, false, nil)
+			}},
+			{"wide_cap_replacement", 7, func(s *parserScratch) []glrStack {
+				s.merge.perKeyCap = 7
+				stacks := pruningCertificateStacks(8, true)
+				for i := range stacks {
+					stacks[i].score = i
+				}
+				return mergeStacksWithScratch(stacks, &s.merge)
+			}},
+			{"wide_cap_rejection", 7, func(s *parserScratch) []glrStack {
+				s.merge.perKeyCap = 7
+				stacks := pruningCertificateStacks(8, true)
+				for i := range stacks {
+					stacks[i].score = -i
+				}
+				return mergeStacksWithScratch(stacks, &s.merge)
+			}},
+			{"alive_limit", 7, func(s *parserScratch) []glrStack {
+				s.merge.budgetBytes = 7 * int64(unsafe.Sizeof(glrStack{})+unsafe.Sizeof(glrMergeSlot{}))
+				return mergeStacksWithScratch(pruningCertificateStacks(8, false), &s.merge)
+			}},
+		} {
+			t.Run(fmt.Sprintf("%s/audit=%t", tc.name, audit), func(t *testing.T) {
+				scratch := parserScratch{}
+				scratch.audit.enabled = audit
+				scratch.merge.audit = &scratch.audit
+				scratch.merge.beginEquivEpoch()
+				if got := len(tc.prune(&scratch)); got != tc.keep {
+					t.Fatalf("survivors = %d, want %d", got, tc.keep)
+				}
+				if !scratch.merge.policyPruned {
+					t.Error("discard did not set the always-on pruning bit")
+				}
+				arena := newNodeArena(arenaClassFull)
+				defer arena.Release()
+				var runtime ParseRuntime
+				captureParseScratchStats(&runtime, &scratch, arena, nil)
+				if arena.legacyNoPolicyPruning {
+					t.Error("discarded live alternatives certified as unpruned")
+				}
+				if !audit && (runtime.GlobalCullStacksIn != 0 || runtime.GlobalCullStacksOut != 0) {
+					t.Error("disabled audit recorded diagnostic counters")
+				}
+
+				// Isolate the recovery proof's pruning guard. All other receipts
+				// are valid, so the discarded frontier must prevent certification.
+				source := make([]byte, 512*1024)
+				arena.legacyReuseReads = incr.NewReads(len(source))
+				arena.legacyReuseReads.Record(0, uint32(len(source)+1))
+				root := newLeafNodeInArena(arena, 3, true, 0, uint32(len(source)), Point{}, Point{Column: uint32(len(source))})
+				root.setHasError(true)
+				tree := &Tree{root: root, arena: arena}
+				tree.ensureParseRuntime().StopReason = ParseStopAccepted
+				parser := NewParser(buildArithmeticLanguage())
+				tree.ensureParseRuntime().MaxStacksSeen = fullParseInitialMaxStacks(parser.language, parser.maxConflictWidth, source)
+				cursor := reuseCursor{cEquivalentReuse: true, oldRecoveryCertified: true, oldRuntimeNoPolicyPruning: true}
+				if cursor.certifiesIncrementalResult(tree, parser, source, 0) {
+					t.Error("pruned recovery result bypassed fresh verification")
+				}
+				arena.legacyNoPolicyPruning = true
+				if !cursor.certifiesIncrementalResult(tree, parser, source, 0) {
+					t.Fatal("control does not reach the pruning guard")
+				}
+			})
+		}
+	}
+}
+
+func TestPruningCertificatePreservingMergesAndReset(t *testing.T) {
+	for _, audit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("audit=%t", audit), func(t *testing.T) {
+			scratch := parserScratch{}
+			scratch.audit.enabled = audit
+			scratch.merge.audit = &scratch.audit
+			scratch.merge.beginEquivEpoch()
+			arena := newNodeArena(arenaClassFull)
+			defer arena.Release()
+			var runtime ParseRuntime
+			assertCertificate := func(want bool) {
+				t.Helper()
+				captureParseScratchStats(&runtime, &scratch, arena, nil)
+				if arena.legacyNoPolicyPruning != want {
+					t.Fatalf("unpruned = %t, want %t", arena.legacyNoPolicyPruning, want)
+				}
+			}
+			// Equivalent histories and dead branches lose no live alternative.
+			stacks := pruningCertificateStacks(8, true)
+			for i := range stacks {
+				stacks[i].entries[0].state = 1
+			}
+			scratch.merge.perKeyCap = 7
+			if got := len(mergeStacksWithScratch(stacks, &scratch.merge)); got != 1 {
+				t.Fatalf("equivalent survivors = %d, want 1", got)
+			}
+			assertCertificate(true)
+			stacks = pruningCertificateStacks(8, false)
+			for i := 1; i < len(stacks); i++ {
+				stacks[i].dead = true
+			}
+			mergeStacksWithScratch(stacks, &scratch.merge)
+			assertCertificate(true)
+			(&Parser{}).cullParseStacksForIteration(pruningCertificateStacks(8, false), &scratch, arenaClassFull, 3, 3, false, nil)
+			scratch.merge.beginEquivEpoch()
+			mergeStacksWithScratch(pruningCertificateStacks(1, false), &scratch.merge)
+			assertCertificate(false)
+			scratch.merge.reset()
+			assertCertificate(true)
+		})
 	}
 }

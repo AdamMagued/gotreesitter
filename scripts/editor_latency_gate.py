@@ -330,16 +330,48 @@ def campaign_lock(path=Path("/tmp/gotreesitter-editor-latency.lock")):
 
 
 def campaign_harness_command(root, out):
-    return ["bash", root / "cgo_harness/docker/run_parity_in_docker.sh",
-            "--out-root", out / "harness"]
+    command = ["bash", root / "cgo_harness/docker/run_parity_in_docker.sh",
+               "--out-root", out / "harness"]
+    if os.environ.get("GTS_EDITOR_LATENCY_IMAGE"):
+        command += ["--image", os.environ["GTS_EDITOR_LATENCY_IMAGE"]]
+    return command
 
 
 def campaign_docker_command(root, base, out, cpu):
-    return campaign_harness_command(root, out) + ["--no-build",
+    command = campaign_harness_command(root, out) + ["--no-build",
             "--memory", os.environ.get("GTS_EDITOR_LATENCY_MEMORY_LIMIT") or "8g",
             "--gomemlimit", os.environ.get("GOMEMLIMIT") or "6GiB",
             "--cpuset-cpus", str(cpu), "--cpus", "1",
             "--mount", f"{base}:/baseline:ro", "--mount", f"{out}:/campaign"]
+    for variable, target in (("GOCACHE", "/lane-go-cache"), ("GOTMPDIR", "/lane-go-tmp"), ("TMPDIR", "/lane-tmp")):
+        if os.environ.get(variable):
+            command += ["--mount", f"{os.environ[variable]}:{target}"]
+    if os.environ.get("GOCACHE"):
+        command += ["--no-chown"]
+    return command
+
+
+def campaign_go_environment():
+    return "; ".join(f"export {variable}={target}" for variable, target in
+                     (("GOCACHE", "/lane-go-cache"), ("GOTMPDIR", "/lane-go-tmp"), ("TMPDIR", "/lane-tmp"))
+                     if os.environ.get(variable)) or "true"
+
+
+def check_work_exemptions_shrink(before, after):
+    def keyed(entries):
+        rows = {(e["fixture_sha256"], e["cell"], e["class"]): e for e in entries}
+        require(len(rows) == len(entries), "duplicate W5 work exemption")
+        return rows
+    old, new = keyed(before), keyed(after)
+    require(all(key in old and old[key] == entry for key, entry in new.items()),
+            "W5 work exemptions may only shrink; additions and changed receipts are forbidden")
+
+
+def check_work_exemptions_history(root, base_revision):
+    path = "internal/benchfixtures/w5_work_exemptions.json"
+    previous = subprocess.run(["git", "-C", root, "show", f"{base_revision}:{path}"], capture_output=True, text=True)
+    if previous.returncode == 0:
+        check_work_exemptions_shrink(json.loads(previous.stdout), read_json(root / path))
 
 
 def campaign(root, base_revision, out):
@@ -347,6 +379,7 @@ def campaign(root, base_revision, out):
     head_revision = git(root, "rev-parse", "HEAD")
     base_revision = git(root, "rev-parse", base_revision + "^{commit}")
     clean_revision(root, head_revision)
+    check_work_exemptions_history(root, base_revision)
     require(not out.exists(), "campaign output already exists; do not overwrite receipts")
     out.mkdir(parents=True)
     manifest_path = root / "cgo_harness/editor_latency/fixtures.json"
@@ -392,7 +425,7 @@ replace github.com/tree-sitter/go-tree-sitter => github.com/tree-sitter/go-tree-
     run_checked(["go", "install", BENCHSTAT_MODULE], env=tool_env)
     env["benchstat_module"] = BENCHSTAT_MODULE
     env["benchstat_sha256"] = sha((out / "tools/benchstat").read_bytes())
-    env["image"] = "gotreesitter/cgo-harness:go1.25-local"
+    env["image"] = os.environ.get("GTS_EDITOR_LATENCY_IMAGE") or "gotreesitter/cgo-harness:go1.25-local"
     run_checked(campaign_harness_command(root, out) + ["--build-only"], stdout=subprocess.DEVNULL)
     env["image_id"] = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", env["image"]], text=True).strip()
     env["go_version"] = subprocess.check_output(["docker", "run", "--rm", env["image"], "go", "version"], text=True).strip()
@@ -407,7 +440,7 @@ replace github.com/tree-sitter/go-tree-sitter => github.com/tree-sitter/go-tree-
             write_json(out / "environment.json", env)
             for f in m["fixtures"]:
                 language = f["language"]
-                commands = ["set -euo pipefail", "export GOWORK=off GOMAXPROCS=1 GTS_EDIT_REPO_ROOT=/workspace GTS_EDIT_MANIFEST=/workspace/cgo_harness/editor_latency/fixtures.json GTS_EDIT_FIXTURES=/campaign/fixtures", f"export GTS_EDIT_LANGUAGE={language}"]
+                commands = ["set -euo pipefail", campaign_go_environment(), "export GOWORK=off GOMAXPROCS=1 GTS_EDIT_REPO_ROOT=/workspace GTS_EDIT_MANIFEST=/workspace/cgo_harness/editor_latency/fixtures.json GTS_EDIT_FIXTURES=/campaign/fixtures", f"export GTS_EDIT_LANGUAGE={language}"]
                 for role, revision in (("base", base_revision), ("head", head_revision)):
                     commands += [f"cd /campaign/modules/{role}", "go mod tidy", f"GTS_EDIT_REVISION={revision} GTS_EDIT_ADMISSION_OUT=/campaign/admission/{role}/{language}.json go test -tags treesitter_c_parity . -run '^TestW5RealCodeEdits$' -count=1 -v -timeout 15m"]
                 with (out / ("correctness-" + language + ".log")).open("w") as log:
@@ -424,7 +457,7 @@ replace github.com/tree-sitter/go-tree-sitter => github.com/tree-sitter/go-tree-
                     prefix = f"{language}-seed-{seed}"
                     for role in fragments:
                         fragments[role].append(out / "timing" / f"{prefix}-{role}.txt")
-                    command = "\n".join(["set -euo pipefail", "export GOWORK=off GOMAXPROCS=1 GTS_EDIT_REPO_ROOT=/workspace GTS_EDIT_MANIFEST=/workspace/cgo_harness/editor_latency/fixtures.json GTS_EDIT_FIXTURES=/campaign/fixtures", f"export GTS_EDIT_LANGUAGE={language}", "cd /campaign/modules/head", "/usr/bin/time -v bash /workspace/scripts/run_randomized_benchmarks.sh " + " ".join(shlex.quote(x) for x in ["--runs", "1", "--seed-start", str(seed), "--baseline-root", "/campaign/modules/base", "--baseline-output", f"/campaign/timing/{prefix}-base.txt", "--output", f"/campaign/timing/{prefix}-head.txt", "--tags", "treesitter_c_parity", "--bench-regex", "^BenchmarkW5(OneByte|HundredByte|Typing)$", "--require-benchmarks", ",".join(NAMES)])])
+                    command = "\n".join(["set -euo pipefail", campaign_go_environment(), "export GOWORK=off GOMAXPROCS=1 GTS_EDIT_REPO_ROOT=/workspace GTS_EDIT_MANIFEST=/workspace/cgo_harness/editor_latency/fixtures.json GTS_EDIT_FIXTURES=/campaign/fixtures", f"export GTS_EDIT_LANGUAGE={language}", "cd /campaign/modules/head", "/usr/bin/time -v bash /workspace/scripts/run_randomized_benchmarks.sh " + " ".join(shlex.quote(x) for x in ["--runs", "1", "--seed-start", str(seed), "--baseline-root", "/campaign/modules/base", "--baseline-output", f"/campaign/timing/{prefix}-base.txt", "--output", f"/campaign/timing/{prefix}-head.txt", "--tags", "treesitter_c_parity", "--bench-regex", "^BenchmarkW5(OneByte|HundredByte|Typing)$", "--require-benchmarks", ",".join(NAMES)])])
                     log_path = out / f"timing-{prefix}.log"
                     with log_path.open("w") as log:
                         run_checked(common + ["--label", "w5-timing-" + prefix, "--wall-timeout", "90m", "--", command], stdout=log, stderr=subprocess.STDOUT)

@@ -1380,11 +1380,15 @@ func TestSelectedReduceWindowsFromGSSCapsTraversalWork(t *testing.T) {
 		{Name: "parent", Visible: true, Named: true},
 	}}}
 	act := ParseAction{Type: ParseActionReduce, Symbol: 9, ChildCount: childCount}
+	parser.mergeScratch = &glrMergeScratch{}
 	budget := selectedReduceGSSWorkBudget(childCount, maxMainLinkCount)
 
 	selected, work, capped := parser.selectedReduceWindowsFromGSSWithBudget(arena, act, &stack, int(act.ChildCount), maxMainLinkCount, budget)
 	if !capped {
 		t.Fatal("selected reduce traversal did not report hitting the work budget")
+	}
+	if !parser.mergeScratch.policyPruned {
+		t.Fatal("capped reduction traversal certified as unpruned")
 	}
 	if work != budget {
 		t.Fatalf("selected reduce traversal work = %d, want budget %d", work, budget)
@@ -1741,7 +1745,7 @@ func TestRejectUndrainedPendingForkStacksClearsAndKills(t *testing.T) {
 	glrFaithfulCapOneMerge = true
 	t.Cleanup(func() { glrFaithfulCapOneMerge = old })
 
-	parser := &Parser{pendingForkStacks: []glrStack{newGLRStack(9)}}
+	parser := &Parser{mergeScratch: &glrMergeScratch{}, pendingForkStacks: []glrStack{newGLRStack(9)}}
 	stack := newGLRStack(1)
 
 	if !parser.rejectUndrainedPendingForkStacks(&stack) {
@@ -1752,6 +1756,9 @@ func TestRejectUndrainedPendingForkStacksClearsAndKills(t *testing.T) {
 	}
 	if !stack.dead {
 		t.Fatal("stack.dead = false, want true")
+	}
+	if !parser.mergeScratch.policyPruned {
+		t.Fatal("discarded pending forks certified as unpruned")
 	}
 }
 

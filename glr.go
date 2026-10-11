@@ -297,6 +297,8 @@ func (p *Parser) resetPendingStackBuffersAtBoundary() {
 }
 
 type glrMergeScratch struct {
+	// Sticky for the entire parse, including discards outside merging.
+	// Diagnostics must never determine the incremental recovery proof.
 	policyPruned        bool
 	closedRecoveryMerge bool
 	// lexicalReadSpan belongs to the active token source, never the pool.
@@ -5432,9 +5434,13 @@ func gssMainAddLinkSeenMutate(scratch *glrMergeScratch, n *gssNode, prev *gssNod
 		// Match C's fixed eight-link node: keep the incumbent links, drop this
 		// distinct late link, and let the enclosing merge retire its source.
 		if compactCMainLinkPolicyEnabled(scratch) {
+			scratch.policyPruned = true
 			return true
 		}
 		if gssMainReplaceWorstEquivalentLinkIfBetterMutate(scratch, n, prev, entry, seen) {
+			if scratch != nil {
+				scratch.policyPruned = true
+			}
 			n.hash = 0
 			return true
 		}
@@ -6333,6 +6339,7 @@ func mergeStacksWithScratch(stacks []glrStack, scratch *glrMergeScratch) []glrSt
 			topologyBeforeCull = append(topologyBeforeCull, alive...)
 		}
 		alive = retainTopStacksForLanguage(alive, limit, scratch.language)
+		scratch.policyPruned = true
 		if workCountInstrumentationEnabled {
 			workCountTopologyReconcileVersionSelection(topologyBeforeCull, alive)
 		}
@@ -6774,6 +6781,7 @@ func mergeStacksWithScratchLargeCap(alive []glrStack, scratch *glrMergeScratch, 
 			comparisons = 0
 			if scratch != nil && scratch.parser != nil {
 				if reason := scratch.parser.runtimeMemoryBudgetStopReasonNow(); reason == ParseStopMemoryBudget {
+					scratch.policyPruned = true
 					scratch.mergeBudgetStopReason = reason
 					if perfCountersEnabled {
 						perfRecordMergeOut(len(result))
@@ -6885,6 +6893,7 @@ func mergeStacksWithScratchLargeCap(alive []glrStack, scratch *glrMergeScratch, 
 
 		// Per-key alternative budget reached: replace the weakest
 		// retained candidate only if this stack is better.
+		scratch.policyPruned = true
 		if slot.worstIndex >= 0 {
 			replacedSlot := -1
 			for j := 0; j < slot.count; j++ {
