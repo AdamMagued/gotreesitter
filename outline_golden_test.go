@@ -72,7 +72,7 @@ var outlineGoldenFixtures = []outlineGoldenFixture{
 	{
 		Language: "go",
 		File:     "go/service.go.fixture",
-		Purpose:  "functions and methods from the hand-written Go tags override; a nested function literal that the query does not capture",
+		Purpose:  "types, functions, and methods from the hand-written Go tags override; a nested function literal that the query does not capture",
 	},
 	{
 		Language: "go",
@@ -149,6 +149,11 @@ var outlineGoldenFixtures = []outlineGoldenFixture{
 		File:     "go/counters.go.fixture",
 		Query:    outlineCounterProbeQuery,
 		Purpose:  "pins OmittedDuplicate, OmittedConflict, OmittedNameConflict, OmittedNoName, and OmittedMultipleDefinitions end to end through a live query, which the shipped tags data cannot produce on demand",
+	},
+	{
+		Language: "go",
+		File:     "go/types.go.fixture",
+		Purpose:  "type declarations: struct, interface with a method member, alias, defined type, generic struct, grouped specs; a method owned by its receiver type; multi-name fields, var and const stay uncaptured",
 	},
 }
 
