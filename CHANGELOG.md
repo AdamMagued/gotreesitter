@@ -7,6 +7,8 @@ for tags and release notes while still in `0.x`.
 
 ## [Unreleased]
 
+## [0.56.0] - 2026-10-11
+
 ### Added
 
 - Add opt-in Python, JavaScript, TypeScript and TSX declaration, signature and
@@ -33,9 +35,6 @@ for tags and release notes while still in `0.x`.
   `FactAll` retain their existing contracts
   ([#1435](https://github.com/odvcencio/gotreesitter/issues/1435)).
 
-
-## [0.56.0] - 2026-10-05
-
 ### Changed
 
 - Add bounded lexer-read certificates for incremental subtree reuse. Keep fresh
@@ -55,6 +54,15 @@ for tags and release notes while still in `0.x`.
 
 ### Fixed
 
+- Record every discarded live alternative in the parse-wide pruning state,
+  independently of diagnostic counters, so pruned parses never publish an
+  incremental-reuse certificate. Pruned large recovery edits now receive fresh
+  verification, and the GSS eight-link cap regression is fixed. Six large-edit
+  token-work cells carry exact exemptions that expire with certificate v2
+  ([#1440](https://github.com/odvcencio/gotreesitter/pull/1440)).
+- Include Go type declarations, aliases, parenthesized types and explicit
+  interface methods in inferred Go tags and outlines
+  ([#1438](https://github.com/odvcencio/gotreesitter/pull/1438)).
 - Preserve YAML syntax errors and recovered nodes during result compatibility
   normalization ([#1400](https://github.com/odvcencio/gotreesitter/issues/1400)).
 - Include `ERROR` roots and children in `Node.SExpr` even when recovery leaves
