@@ -462,8 +462,8 @@ func (SwiftExternalScanner) RetainsStateOnScanFailure() bool { return true }
 
 func (s SwiftExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
 	state := payload.(*swtScannerState)
+	var semanticValid [swtTokenCount]bool
 	if len(s.externalToToken) > 0 {
-		var semanticValid [swtTokenCount]bool
 		for externalIdx, valid := range validSymbols {
 			if !valid || externalIdx >= len(s.externalToToken) {
 				continue
@@ -473,9 +473,31 @@ func (s SwiftExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexe
 				semanticValid[tokenIdx] = true
 			}
 		}
-		validSymbols = semanticValid[:]
+	} else {
+		for i := 0; i < len(validSymbols) && i < swtTokenCount; i++ {
+			semanticValid[i] = validSymbols[i]
+		}
 	}
-	return swtScan(state, lexer, validSymbols, s.symbolTable())
+
+	// When both implicit and explicit semicolons are valid, the parse state
+	// is at a statement or declaration separator boundary (_semi). Because
+	// Swift has 34 external tokens, gotreesitter generates its parse tables
+	// through the LALR path, which merges states and produces coarser external
+	// valid sets than tree-sitter CLI's minimal table generator. This falsely
+	// marks the compiler directives (_directive_if, _directive_elseif,
+	// _directive_else, _directive_endif) as valid at separator positions.
+	// In upstream tree-sitter, directives are not valid until the preceding
+	// semicolon separator has been consumed. Mask out the directive bits here
+	// so preceding newlines are properly recognized as implicit semicolons
+	// before #if, #warning, #Preview, #expect, etc. (issue #1399).
+	if semanticValid[swtTokImplicitSemi] && semanticValid[swtTokExplicitSemi] {
+		semanticValid[swtTokDirectiveIf] = false
+		semanticValid[swtTokDirectiveElseif] = false
+		semanticValid[swtTokDirectiveElse] = false
+		semanticValid[swtTokDirectiveEndif] = false
+	}
+
+	return swtScan(state, lexer, semanticValid[:], s.symbolTable())
 }
 
 func (s SwiftExternalScanner) symbolTable() *[swtTokenCount]gotreesitter.Symbol {
