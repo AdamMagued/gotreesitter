@@ -7,7 +7,7 @@ for tags and release notes while still in `0.x`.
 
 ## [Unreleased]
 
-## [0.56.0] - 2026-10-11
+## [0.56.0] - 2026-10-12
 
 ### Added
 
