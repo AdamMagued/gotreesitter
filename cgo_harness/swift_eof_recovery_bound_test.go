@@ -45,7 +45,7 @@ func TestSwiftEOFRecoveryPrefixBoundAndKnownCGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const wantGoDigest = "a6357cc09dad9fb8f6f6c8f452698490d076cbff4f2a4de2b6c5f8bf8014f834"
+	const wantGoDigest = "afad13bec5eba6bc7712d5ea94f8fc82b9d92fefc6321c53a38f8c43b64ab29a"
 	if goInspection.SHA256 != wantGoDigest {
 		t.Fatalf("Swift prefix Go digest = %s, want %s", goInspection.SHA256, wantGoDigest)
 	}

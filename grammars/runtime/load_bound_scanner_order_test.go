@@ -2014,9 +2014,9 @@ func TestYamlExternalScannerSpecMatchesBlob(t *testing.T) {
 		t.Fatalf("yaml blob external symbol count = %d, want %d (spec.Externals length)", got, want)
 	}
 
-	scanner, ok := YamlExternalScanner{}.ExternalScannerForLanguage(lang).(YamlExternalScanner)
+	scanner, ok := YamlExternalScanner{}.ExternalScannerForLanguage(lang).(*YamlExternalScanner)
 	if !ok {
-		t.Fatalf("YamlExternalScanner binding type = %T, want YamlExternalScanner", YamlExternalScanner{}.ExternalScannerForLanguage(lang))
+		t.Fatalf("YamlExternalScanner binding type = %T, want *YamlExternalScanner", YamlExternalScanner{}.ExternalScannerForLanguage(lang))
 	}
 	want := make([]int, yTokCount)
 	for i := range want {

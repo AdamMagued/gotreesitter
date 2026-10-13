@@ -181,18 +181,17 @@ type DiagnosticParserCorePrefixOptions struct {
 	// materializationParser, materializationSource,
 	// materializationForceReplayParseStates, and materializationContextSet
 	// back the compact acceptance-election materiality gate
-	// (completeAcceptance -> compactAcceptanceElectionIsVacuous): when a
+	// (completeAcceptance -> compactAcceptanceElectionMaterialize): when a
 	// certified primary derivation election has more than one live
 	// candidate, the gate re-materializes every candidate through the same
 	// public-tree pipeline the accepted parse itself uses, so it can require
 	// every candidate's tree to match the primary before admitting it.
 	//
-	// materializationForceReplayParseStates must match the value the
-	// caller's own post-acceptance materialization will use, not just be
-	// "some" value: it decides whether replayCompactDerivation stamps
-	// ParseState/PreGotoState on the materialized nodes at all, and the
-	// gate's comparator reads those stamps. A mismatched value would compare
-	// an attribute the published tree does not actually carry.
+	// materializationForceReplayParseStates matches the caller's publication
+	// setting so trials retain the same table-identity precondition. The
+	// comparator excludes replay stamps. Retained publication uses replay
+	// comparisons; other callers preserve the original states-free trials.
+	// Every temporary trial remains ineligible for incremental reuse.
 	//
 	// All fields are set by the two production seed entry points
 	// (DiagnosticParseParserCorePrefix, parserCoreFreshFullRunner's
@@ -211,6 +210,9 @@ type DiagnosticParserCorePrefixOptions struct {
 	materializationSource                 []byte
 	materializationForceReplayParseStates bool
 	materializationContextSet             bool
+	// A full-tree caller may retain the verified primary publication. Other
+	// callers keep the temporary, states-free materiality comparisons.
+	acceptanceMaterializationScratch *parserCoreRunnerScratch
 	// eagerMaterializer, when set, builds public nodes during the scheduler
 	// run (issue #454). The fresh-full runner arms it for a plain parse and
 	// clears it when the run returns.
@@ -1225,25 +1227,15 @@ func diagnosticParserCoreSelectedNodeCensus(root *Node) diagnosticParserCoreSele
 	return census
 }
 
-// Field order groups creationSeq (8-byte aligned), then every 4-byte-aligned
-// field (head, drop-cohort refs, checkpoint, altSet, lastPersistedHead,
-// lastPersistedAltSet, lastPersistedDropCohortRefs),
-// then cleanPathLineage (2-byte aligned), then every remaining byte-sized
-// field. This is layout-only: every construction site across the package
-// and its tests uses keyed fields (grep-verified), so declaration order
-// changes memory footprint, never behavior. The exact current size is 224
-// bytes (unsafe.Sizeof-verified, parsercore_phase0_canonical_scratch_internal_test.go).
-// despite carrying two full (event, branch) alternative sets plus three
-// bools v1 never had (b4b-width-repair audit, 2026-08): the widened
-// AlternativeSet's own inline-capacity reduction (core.go) supplies most of
-// the recovered space, and this reorder folds the three new bools into
-// padding a naive append-at-the-end declaration order would otherwise pay
-// for separately.
+// The scheduler copies headers during dispatch, canonicalization, and rollback.
+// Keep the header size pinned by TestDiagnosticParserCoreCheckpointCompactLayoutsAMD64.
+// Drop-cohort references are persisted independently of the alternative-set
+// dirty check, so the header needs only their current value.
 type diagnosticParserCoreHeader struct {
 	creationSeq    uint64
 	head           core.Head
-	dropCohortRefs core.DropCohortRefSet
 	checkpoint     core.CheckpointID
+	dropCohortRefs core.DropCohortRefSet
 	// altSet mirrors cleanPathRank/cleanPathLineage but by union rather than
 	// overwrite: it accumulates every converged-split (event, branch) member
 	// this derivation thread has passed through and is never invalidated
@@ -1264,16 +1256,15 @@ type diagnosticParserCoreHeader struct {
 	// that Core itself undid. lastPersistedBlended extends the same no-op
 	// detection to blended: persistHeaderLineageOwned must also re-persist
 	// when only blended changed (spec.b4b-alternative-set.v2 section 10).
-	lastPersistedHead           core.Head
-	lastPersistedAltSet         core.AlternativeSet
-	lastPersistedDropCohortRefs core.DropCohortRefSet
-	frontierSequence            uint32
-	cleanPathLineage            uint16
-	freshness                   core.ReductionFreshness
-	shifted                     bool
-	accepted                    bool
-	paused                      bool
-	convergedReductionSplit     bool
+	lastPersistedHead       core.Head
+	lastPersistedAltSet     core.AlternativeSet
+	frontierSequence        uint32
+	cleanPathLineage        uint16
+	freshness               core.ReductionFreshness
+	shifted                 bool
+	accepted                bool
+	paused                  bool
+	convergedReductionSplit bool
 	// resurrectionUnproved marks a header descended from a
 	// HistoricalBoundaryUnproved dead-node import: a non-deterministic,
 	// non-converged historical boundary with no recorded provenance to prove
@@ -1292,8 +1283,8 @@ type diagnosticParserCoreHeader struct {
 	// recoveryFlags records recovery competition and permanent cost provenance,
 	// plus one unrelated bit (diagnosticParserCoreZeroWidthReopenedFlag) that
 	// only shares this byte for layout reasons -- see that flag's own doc
-	// comment. It sits before versionState in the padding byte at offset 215.
-	// Placing it after the pointer would grow each header from 224 to 232
+	// comment. It sits before versionState in the padding byte at offset 75.
+	// Placing it after the pointer would grow each header from 88 to 96
 	// bytes, and this struct has no other spare bits: every additional field
 	// or byte here shifts versionState's own 8-byte-aligned offset outward
 	// (unsafe.Sizeof-verified, parsercore_phase0_canonical_scratch_internal_test.go
@@ -1851,10 +1842,11 @@ func (s *diagnosticParserCoreGenericScheduler) persistHeaderLineageOwned(
 		// blended) triple is already what was last persisted for this header
 		// (spec.b4b-alternative-set.v2 section 10: the dirtiness check must
 		// also compare blended, or conservatively persist when it changes).
+		// Drop-cohort references have their own unconditional union inside
+		// RecordHeadLineageOwned; they do not dirty the alternative set.
 		setDirty := header.head != header.lastPersistedHead ||
 			header.altSet != header.lastPersistedAltSet ||
-			header.blended != header.lastPersistedBlended ||
-			header.dropCohortRefs != header.lastPersistedDropCohortRefs
+			header.blended != header.lastPersistedBlended
 		if err := s.compact.RecordHeadLineageOwned(
 			owner,
 			header.head,
@@ -1869,7 +1861,6 @@ func (s *diagnosticParserCoreGenericScheduler) persistHeaderLineageOwned(
 		}
 		header.lastPersistedHead = header.head
 		header.lastPersistedAltSet = header.altSet
-		header.lastPersistedDropCohortRefs = header.dropCohortRefs
 		header.lastPersistedBlended = header.blended
 	}
 	return nil
@@ -2458,7 +2449,13 @@ func (s *diagnosticParserCoreCanonicalScratch) canonicalizeWithMutation(
 		}
 		if canonical, ok := compact.CanonicalBoundary(state, byteOffset, header.shifted, header.checkpoint); ok &&
 			!header.isRecoveryLineage() && header.recoveryRegion() == nil && !header.isRecoveryCosted() {
-			header.head = canonical
+			if core.CanonicalVersionRemap(header.head, canonical, core.ExternalLexerOwnershipProbeEnabled() && header.versionLexerSnapshot() != nil, headers,
+				func(other diagnosticParserCoreHeader, target core.Head) bool {
+					return other.head == target && (other.versionState == header.versionState ||
+						s.versionStateOwner != nil && s.versionStateOwner.versionLexerStateEqual(other.versionState, header.versionState))
+				}) {
+				header.head = canonical
+			}
 		}
 		header.freshness = 0
 		s.nextBuffer = uint8(target ^ 1)
@@ -2490,7 +2487,13 @@ func (s *diagnosticParserCoreCanonicalScratch) canonicalizeWithMutation(
 		}
 		if canonical, ok := compact.CanonicalBoundary(state, byteOffset, header.shifted, header.checkpoint); ok &&
 			!header.isRecoveryLineage() && header.recoveryRegion() == nil && !header.isRecoveryCosted() {
-			header.head = canonical
+			if core.CanonicalVersionRemap(header.head, canonical, core.ExternalLexerOwnershipProbeEnabled() && header.versionLexerSnapshot() != nil, headers,
+				func(other diagnosticParserCoreHeader, target core.Head) bool {
+					return other.head == target && (other.versionState == header.versionState ||
+						s.versionStateOwner != nil && s.versionStateOwner.versionLexerStateEqual(other.versionState, header.versionState))
+				}) {
+				header.head = canonical
+			}
 		}
 		versionState := header.versionState
 		if header.versionLexerSnapshot() == nil {
@@ -3028,7 +3031,7 @@ type diagnosticParserCoreGenericScheduler struct {
 	acceptedHead         core.Head
 	acceptedPayloads     []core.SubtreeID
 	// acceptedRootFinalization is a scheduler sidecar. Keeping it outside the
-	// fixed header preserves the 224-byte scheduler-header contract.
+	// fixed header preserves the 96-byte scheduler-header contract.
 	acceptedRootFinalization   diagnosticParserCoreRootFinalization
 	eofRecoveryAdmission       compactEOFRecoveryAdmissionReceipt
 	conflictPostExecutionFault func() error
@@ -3084,7 +3087,7 @@ type diagnosticParserCoreGenericScheduler struct {
 	// zeroWidthCatchUp is ownedZeroWidthCatchUp's own per-header, per-election
 	// budget sidecar, keyed by the header's own creationSeq (stable across
 	// canonicalization reordering, unlike a header index). Keeping it outside
-	// the fixed header preserves the 224-byte scheduler-header contract (see
+	// the fixed header preserves the 96-byte scheduler-header contract (see
 	// acceptedRootFinalization's own comment above): only a header that has
 	// actually taken an owned zero-width shift ever gets an entry, so the
 	// common case -- a parse this mechanism never fires for -- costs one nil
@@ -4694,6 +4697,10 @@ func resetDiagnosticParserCoreGenericScheduler(scheduler *diagnosticParserCoreGe
 	acceptedPayloads := resetDiagnosticParserCoreRetainedSlice(scheduler.acceptedPayloads)
 	versionLexerRequests := resetDiagnosticParserCoreRetainedSlice(scheduler.versionLexerRequests)
 	versionLexerBeforeScratch := resetDiagnosticParserCoreDFARelexSnapshotScratch(scheduler.versionLexerBeforeScratch)
+	// Relex snapshots are transient, but their independent buffers can survive
+	// a pooled parse after the same clearing and capacity checks as election scratch.
+	relexPriorScratch := resetDiagnosticParserCoreDFARelexSnapshotScratch(scheduler.relexPriorScratch)
+	relexAfterScratch := resetDiagnosticParserCoreDFARelexSnapshotScratch(scheduler.relexAfterScratch)
 	reuseDependencies := scheduler.reuseDependencies.reset()
 	// Retain the recovery cost memo's capacity across sessions. Reset clears
 	// every entry, so a new session never reads a cost from an earlier parse.
@@ -4722,6 +4729,8 @@ func resetDiagnosticParserCoreGenericScheduler(scheduler *diagnosticParserCoreGe
 		electGLRStates:               electGLRStates,
 		acceptedPayloads:             acceptedPayloads,
 		versionLexerBeforeScratch:    versionLexerBeforeScratch,
+		relexPriorScratch:            relexPriorScratch,
+		relexAfterScratch:            relexAfterScratch,
 		versionLexerRequests:         versionLexerRequests,
 	}
 	return nil
@@ -5672,9 +5681,11 @@ func (s *diagnosticParserCoreGenericScheduler) versionLexerRequestSnapshotsValid
 		return false
 	}
 	for _, snapshot := range []*diagnosticParserCoreVersionLexerSnapshot{request.before, request.after} {
-		if err := snapshot.validateDestination(s.compact, s.tokenSource.language); err != nil {
+		if snapshot.compact != s.compact || snapshot.language != s.tokenSource.language {
 			return false
 		}
+		// validate authenticates this same destination as well as both owned
+		// checkpoint copies. Do not repeat its scanner-contract check above.
 		if err := snapshot.validate(); err != nil {
 			return false
 		}
@@ -5980,7 +5991,7 @@ func (s *diagnosticParserCoreGenericScheduler) requestVersionLexerHeader(index i
 	// including snapshot validation, checkpoint, and publication failures.
 	// Keep parser state and GLR state with the DFA cursor: the next shared
 	// election must observe exactly the state that preceded this request.
-	priorDFA := s.tokenSource.snapshotRelexState()
+	priorDFA := s.tokenSource.snapshotRelexStateWithScratch(&s.relexPriorScratch)
 	priorState := s.tokenSource.state
 	priorGLRStates := s.tokenSource.glrStates
 	defer func() {
@@ -6003,7 +6014,7 @@ func (s *diagnosticParserCoreGenericScheduler) requestVersionLexerHeader(index i
 	s.tokenSource.SetGLRStates(nil)
 	beforeID := base.afterCheckpoint
 	token := s.tokenSource.Next()
-	afterDFA := s.tokenSource.snapshotRelexState()
+	afterDFA := s.tokenSource.snapshotRelexStateWithScratch(&s.relexAfterScratch)
 	afterBytes := s.tokenSource.captureExternalScannerStateInto(s.scannerScratch)
 	afterID, _, err := diagnosticParserCoreInternCheckpoint(s.compact, afterBytes)
 	if err != nil {
@@ -6091,7 +6102,8 @@ func (s *diagnosticParserCoreGenericScheduler) captureSharedElectionSnapshotFrom
 	if s == nil || s.tokenSource == nil {
 		return errors.New("parser-core phase zero: shared lexer snapshot source is unavailable")
 	}
-	s.versionLexerBefore = s.tokenSource.snapshotRelexStateWithScratchFromExternalPayload(
+	s.tokenSource.snapshotRelexStateWithScratchFromExternalPayload(
+		&s.versionLexerBefore,
 		&s.versionLexerBeforeScratch,
 		externalPayload,
 	)
@@ -6490,7 +6502,7 @@ func (s *diagnosticParserCoreGenericScheduler) rejoinSharedLexerFromOwnedHeader(
 	if err != nil {
 		return err
 	}
-	priorDFA := s.tokenSource.snapshotRelexState()
+	priorDFA := s.tokenSource.snapshotRelexStateWithScratch(&s.relexPriorScratch)
 	priorState := s.tokenSource.state
 	priorGLRStates := s.tokenSource.glrStates
 	committed := false
@@ -6734,8 +6746,9 @@ type diagnosticParserCorePointIndex struct {
 // synchronously and copies every surviving child/field slice into the result
 // arena, so the next postorder parent may safely reuse both buffers.
 type diagnosticParserCoreMaterializationScratch struct {
-	entries []stackEntry
-	reduce  reduceBuildScratch
+	entries     []stackEntry
+	reduce      reduceBuildScratch
+	checkpoints core.CheckpointCopyScratch
 }
 
 func (scratch *diagnosticParserCoreMaterializationScratch) entriesFor(width int) []stackEntry {
@@ -6767,6 +6780,7 @@ func (scratch *diagnosticParserCoreMaterializationScratch) reset() {
 		clear(scratch.reduce.nodes[:cap(scratch.reduce.nodes)])
 	}
 	scratch.reduce.reset()
+	scratch.checkpoints.Reset()
 }
 
 func withDiagnosticParserCoreMaterializationScratch(parser *Parser, visit func(*diagnosticParserCoreMaterializationScratch) error) (err error) {
@@ -6801,13 +6815,15 @@ const parserCoreMaxRetainedNodeScratch = 256 * 1024
 // parserCoreMaxRetainedLineStarts caps the retained line-start buffer.
 const parserCoreMaxRetainedLineStarts = 256 * 1024
 
-// parserCoreRunnerScratch retains the reusable per-Parser materialization
-// buffers for the compact candidate route. The fresh-full runner is per-Parser
-// and single-goroutine (see parserCoreFreshFullRunner), so retaining these
-// buffers on it and resetting them per parse mirrors production's parser-held
-// arena reuse: the warm steady state stops re-allocating the public-tree
-// scratch on every parse.
+// Bound the complete secondary workspace, including every backing array.
+// Large comparisons still work; their scratch leaves the lease after use.
+const parserCoreMaxRetainedComparisonBytes = 256 * 1024
+
+// parserCoreRunnerScratch retains materialization buffers for one exclusively
+// owned runtime. Reset removes tree references before the next request borrows
+// its storage; published trees own their nodes independently.
 type parserCoreRunnerScratch struct {
+	derivations                    core.DerivationScratch
 	materialization                diagnosticParserCoreMaterializationScratch
 	postorder                      core.MaterializationPostorderScratch
 	acceptedLeaves                 diagnosticParserCoreAcceptedLeafCoverageScratch
@@ -6820,6 +6836,13 @@ type parserCoreRunnerScratch struct {
 	// also set recoveryTerminalAliasCertified for this materialization.
 	recoveryTerminalAliasSymbol    Symbol
 	recoveryTerminalAliasCertified bool
+	materializationPurpose         core.MaterializationPurpose
+	acceptanceMaterialization      core.AcceptanceMaterialization[*Tree]
+	// The alternative construction workspace owns no published nodes. It is
+	// reused only by this exclusively leased runner, then cleared and bounded.
+	acceptanceComparison *parserCoreRunnerScratch
+	// During comparison, charge the reference arena beside the trial arena.
+	materializationReferenceBytes uint64
 	// materializer builds the public nodes. It retains the per-id node
 	// tables between parses and carries the eager state across a run.
 	materializer   compactMaterializer
@@ -7102,9 +7125,17 @@ func (s *parserCoreRunnerScratch) resetTreeBuffers() {
 	if s == nil {
 		return
 	}
+	if comparison := s.acceptanceComparison; comparison != nil {
+		comparison.resetTreeBuffers()
+		if comparison.materializationRetainedBytes() > parserCoreMaxRetainedComparisonBytes {
+			s.acceptanceComparison = nil
+		}
+	}
 	s.postorder.Reset()
 	s.acceptedLeaves.reset()
+	s.materialization.checkpoints.Reset()
 	s.materializationBudgetScheduler = nil
+	s.materializationReferenceBytes = 0
 	s.incrementalReuse = nil
 	s.recoveryTerminalAliasSymbol = 0
 	s.recoveryTerminalAliasCertified = false
@@ -7779,14 +7810,13 @@ func diagnosticParserCoreGapIsToleratedWithPoll(gap []byte, poll func() error) (
 // scanner snapshots into the public arena. Core checkpoint IDs are not valid
 // after materialization, so retain only byte copies in the node sidecar.
 // It returns false unless the complete scanner provenance pair is attached.
-func materializeCompactExternalScannerCheckpoint(compact *core.Core, arena *nodeArena, node *Node, view core.MaterializationSubtreeView) bool {
+func materializeCompactExternalScannerCheckpoint(compact *core.Core, arena *nodeArena, node *Node, view core.MaterializationSubtreeView, scratch *core.CheckpointCopyScratch) bool {
 	if compact == nil || arena == nil || node == nil || node.ownerArena != arena || !view.ExternalScannerCheckpointExact ||
 		view.ExternalScannerCheckpointStart == 0 || view.ExternalScannerCheckpointEnd == 0 {
 		return false
 	}
-	start, startOK := compact.CopyCheckpointBytes(view.ExternalScannerCheckpointStart, nil)
-	end, endOK := compact.CopyCheckpointBytes(view.ExternalScannerCheckpointEnd, nil)
-	if !startOK || !endOK {
+	start, end, ok := scratch.CopyPair(compact, view.ExternalScannerCheckpointStart, view.ExternalScannerCheckpointEnd)
+	if !ok {
 		return false
 	}
 	checkpoint := arena.recordExternalScannerCompactCheckpoint(start, end)
@@ -7853,6 +7883,10 @@ func materializeDiagnosticParserCoreAcceptedSelectionWithRootFinalization(compac
 	if incrementalReuse != nil && (allowErrorRoot || rootFinalization != diagnosticParserCoreFinalizeDefault) {
 		return nil, compactIncrementalMaterializationDecline("borrowed subtrees require clean default root finalization")
 	}
+	if scratch != nil && scratch.materializationPurpose != core.MaterializationForPublication &&
+		(incrementalReuse != nil || allowErrorRoot || rootFinalization != diagnosticParserCoreFinalizeDefault) {
+		return nil, errors.New("parser-core phase zero: comparison materialization requires a fresh clean derivation")
+	}
 	stats, err := compact.Stats(head)
 	if err != nil {
 		return nil, err
@@ -7867,15 +7901,17 @@ func materializeDiagnosticParserCoreAcceptedSelectionWithRootFinalization(compac
 	// same transition rules replayCompactDerivation applies, so the tree needs
 	// no second full-derivation pass.
 	replayEnabled := incrementalReuse != nil || forceReplayParseStates || parserCoreReplayParseStatesEnabled()
-	var local compactMaterializer
-	m := &local
+	var m *compactMaterializer
 	if scratch != nil {
 		m = &scratch.materializer
+	} else {
+		m = &compactMaterializer{}
 	}
 	// The eager driver may have built part of this derivation during the
 	// scheduler run. Adopt that state when the pass flags match the plain
 	// shape it assumed; otherwise release it and build from scratch.
-	adopted := m.eagerAdoptable(compact, parser, source, incrementalReuse, allowErrorRoot, rootFinalization, replayEnabled)
+	adopted := (scratch == nil || scratch.materializationPurpose == core.MaterializationForPublication) &&
+		m.eagerAdoptable(compact, parser, source, incrementalReuse, allowErrorRoot, rootFinalization, replayEnabled)
 	if !adopted {
 		m.abandonEager()
 		if err := m.begin(compact, parser, source, scratch, incrementalReuse, replayEnabled); err != nil {
@@ -7936,7 +7972,7 @@ func materializeDiagnosticParserCoreAcceptedSelectionWithRootFinalization(compac
 	materializeVisit := func(materializationScratch *diagnosticParserCoreMaterializationScratch) error {
 		m.materializationScratch = materializationScratch
 		if scratch != nil {
-			return compact.VisitMaterializationPostorderPrebuilt(payloads, poll, &scratch.postorder, m.replayRootPre, m.replayTransition, prebuilt, m.visit)
+			return compact.VisitMaterializationPostorderPrebuiltWithBorrowedReplay(payloads, poll, &scratch.postorder, m.replayRootPre, m.replayTransition, prebuilt, m.visit)
 		}
 		return compact.VisitMaterializationPostorder(payloads, poll, func(id core.SubtreeID, view core.MaterializationSubtreeView) error {
 			return m.visit(id, &view)
@@ -8129,7 +8165,7 @@ func materializeDiagnosticParserCoreAcceptedSelectionWithRootFinalization(compac
 	// potentially reusable visible node and the scanner transfer is proven.
 	// Recovery-bearing nodes stay excluded by the reuse cursor, which descends
 	// to clean siblings while preserving the ordinary scanner gate.
-	compactIncrementalReuseProven := replayEnabled &&
+	compactIncrementalReuseProven := m.purpose == core.MaterializationForPublication && replayEnabled &&
 		compactIncrementalReuseProvenForLanguage(parser.language) &&
 		m.scannerProvenanceTransferProven && compactTreeIncrementalReuseProven(root, linkScratch)
 	tree.incrementalReuseDisabled = !compactIncrementalReuseProven
@@ -8147,7 +8183,7 @@ func materializeDiagnosticParserCoreAcceptedSelectionWithRootFinalization(compac
 		}
 	}
 	if compactIncrementalReuseProven && budgetScheduler != nil {
-		if err := budgetScheduler.publishCompactLegacyReads(parser, arena, nodesByID, compact.MaterializationView, points, poll); err != nil {
+		if err := budgetScheduler.publishCompactLegacyReads(arena, nodesByID, compact.SubtreeGeometry, points, poll); err != nil {
 			return rejectTree(err)
 		}
 		if err := budgetScheduler.publishCompactReuseDependencies(parser, root, arena, nodesByID, compact.MaterializationView, points, acceptedLeaves.footprintBytes(), poll); err != nil {
@@ -8584,7 +8620,11 @@ func (s *diagnosticParserCoreGenericScheduler) classifyVersionLexerCell(
 	if err := s.requestHeaderLexerToken(index); err != nil {
 		return diagnosticParserCoreGenericCell{}, false, nil, err
 	}
-	requestReference := s.versionLexerRequestReferenceForHeader(index)
+	// requestHeaderLexerToken either validated the existing request or
+	// published a freshly authenticated one. Its reference is stable until
+	// this dispatch changes the header; validating both snapshots again here
+	// would duplicate that work.
+	requestReference := s.headers[index].versionLexerRequestReference()
 	if requestReference == 0 {
 		return diagnosticParserCoreGenericCell{}, false, nil, fmt.Errorf(
 			"parser-core phase zero: version lexer request was not published for header %d",
@@ -9062,6 +9102,25 @@ func (s *diagnosticParserCoreGenericScheduler) pruneZeroWidthCatchUp() {
 func (s *diagnosticParserCoreGenericScheduler) dispatchPassActive() (*diagnosticParserCoreGenericUnsupported, error) {
 	if s.versionLexerOwnershipActive {
 		return s.dispatchVersionLexerPassActive()
+	}
+	// When the scanner owns the entire terminal lexicon, one shared token can
+	// hide different requests at the same byte. Establish each version's lexer
+	// identity before reducing either path into a shared boundary.
+	if len(s.headers) > 1 && s.token.ExternalScannerToken && core.ExternalLexerOwnershipProbeEnabled() && s.tokenSource != nil &&
+		s.tokenSource.language != nil && core.ExternalLexerOwnsAllTerminals(
+		s.tokenSource.language.TokenCount, s.tokenSource.language.ExternalSymbols) {
+		eligible := true
+		for index := range s.headers {
+			header := &s.headers[index]
+			if header.shifted || header.paused || header.accepted || header.isRecoveryLineage() ||
+				header.recoveryRegion() != nil || header.isRecoveryCosted() {
+				eligible = false
+				break
+			}
+		}
+		if eligible {
+			return s.activateVersionLexerOwnershipAtRagged(0)
+		}
 	}
 	s.work.Passes++
 	// R6 pass-mix counter. A single-header pass is exactly the shape the C4
@@ -11142,7 +11201,27 @@ func (s *diagnosticParserCoreGenericScheduler) completeAcceptance() (err error) 
 			member.recoveryRegion() != nil {
 			return s.finish(DiagnosticParserCoreAccept, "recovered root group has invalid provenance", index)
 		}
-		memberPaths, pathErr := compactDerivationsForAcceptance(s.compact, member.head)
+		var memberPaths []core.Derivation
+		var pathErr error
+		if scratch := s.options.acceptanceMaterializationScratch; scratch != nil && len(groupMembers) == 1 {
+			// Only this accepted group borrows the buffers. Materialization
+			// resets its own workspace while these paths stay live, so expire
+			// them only after selection and publication have copied their keys.
+			defer scratch.derivations.Reset()
+			memberPaths, pathErr = s.compact.DerivationsWithScratch(member.head, &scratch.derivations, func() error {
+				// Enumeration can grow between dispatches. Charge its complete
+				// capacities now, independent of the dispatch poll throttle.
+				if reason := s.stopControlMemoryBudgetReason(); resultMaterializationShouldStop(reason) {
+					return diagnosticParserCoreStopControlTripped(reason)
+				}
+				return s.pollStopControl()
+			})
+			if errors.Is(pathErr, core.ErrDerivationEnumerationCap) {
+				pathErr = &diagnosticParserCoreDecline{boundary: DiagnosticParserCoreAccept, detail: "accepted derivation enumeration cap"}
+			}
+		} else {
+			memberPaths, pathErr = compactDerivationsForAcceptance(s.compact, member.head)
+		}
 		if pathErr != nil {
 			// A capped enumeration leaves the accepted path set unknown.
 			s.censusAcceptanceDerivationSetTruncated()
@@ -11227,13 +11306,27 @@ func (s *diagnosticParserCoreGenericScheduler) completeAcceptance() (err error) 
 			s.censusAcceptanceDerivationSet(paths, path, true, true)
 			return s.finish(DiagnosticParserCoreAccept, detail, 0)
 		}
-		if !compactAcceptanceElectionIsVacuous(
+		publicationScratch := s.options.acceptanceMaterializationScratch
+		if len(path.Payloads) > core.AcceptanceMaterializationPayloadLimit {
+			publicationScratch = nil
+		}
+		if publicationScratch != nil {
+			publicationScratch.materializationBudgetScheduler = s
+		}
+		publication, vacuous := compactAcceptanceElectionMaterialize(
 			s.compact, s.options.materializationParser, s.options.materializationSource,
 			s.options.materializationForceReplayParseStates, s.options.materializationContextSet,
-			winnerHeader.head, paths, path,
-		) {
+			winnerHeader.head, paths, path, publicationScratch,
+		)
+		if !vacuous {
 			s.censusAcceptanceDerivationSet(paths, path, true, true)
 			return s.finish(DiagnosticParserCoreAccept, compactAcceptanceElectionMaterialDetail, 0)
+		}
+		if publication != nil && !publicationScratch.acceptanceMaterialization.Store(
+			s.compact, winnerHeader.head, path.Payloads,
+			compactAcceptanceMaterializationContext(s.options.materializationForceReplayParseStates), publication,
+		) {
+			publication.Release()
 		}
 	}
 	// Stage D0 instrument (spec.derivation-set-equivalence.v1): record the
@@ -11537,13 +11630,13 @@ func compactAcceptanceElectionMaterialityDeclineDetail(paths []core.Derivation, 
 // on this witness); this gate now declines it. See the cost note where
 // completeAcceptance calls this function for that specific regression.
 //
-// forceReplayParseStates must equal the value the caller's own
-// post-acceptance materialization will use (DiagnosticParserCorePrefixOptions
-// .materializationForceReplayParseStates): it decides whether the
-// materialized nodes carry ParseState/PreGotoState stamps at all, and this
-// function's contract is to compare what the published tree actually
-// carries, not some other configuration. contextSet distinguishes "no caller
-// provided a materialization context" (fail closed) from "the caller
+// forceReplayParseStates carries the caller's publication setting so trials
+// retain its table-identity precondition. The comparison excludes parser
+// states, as documented by compactAcceptanceDerivationTreesEqual below.
+// Temporary trees preserve the original nil-scratch trials' states-free
+// traversal; the published tree separately runs replay and reuse validation.
+// contextSet distinguishes "no caller provided a materialization context"
+// (fail closed) from "the caller
 // provided one, and the source is legitimately empty". completeAcceptance
 // checks contextSet itself before calling this function and picks
 // compactAcceptanceElectionNoContextDetail instead of running a call that
@@ -11556,50 +11649,115 @@ func compactAcceptanceElectionMaterialityDeclineDetail(paths []core.Derivation, 
 // fail-closed contract every other compact decline in this file uses: the
 // route never guesses.
 //
-// This redundantly re-materializes primary (once here for comparison, once
-// again by the caller's normal post-acceptance materialization). That cost
-// lands only on multi-derivation accepts, which are rare; a sole-derivation
-// accept (the overwhelming majority) never reaches this function at all.
+// Callers without a publication owner release every trial here and later
+// rebuild the primary. Eligible fresh-full callers use the helper below to
+// retain its completed publication. A sole derivation needs no comparisons.
 func compactAcceptanceElectionIsVacuous(
 	compact *core.Core, parser *Parser, source []byte,
 	forceReplayParseStates bool, contextSet bool,
 	head core.Head, paths []core.Derivation, primary core.Derivation,
 ) bool {
+	_, vacuous := compactAcceptanceElectionMaterialize(compact, parser, source,
+		forceReplayParseStates, contextSet, head, paths, primary, nil)
+	return vacuous
+}
+
+func compactAcceptanceMaterializationContext(forceReplayParseStates bool) uint64 {
+	if forceReplayParseStates || parserCoreReplayParseStatesEnabled() {
+		return 1
+	}
+	return 0
+}
+
+// With a publication caller, the reference retains all replay and scanner
+// provenance. Alternatives use the states-free comparison traversal because
+// the public-tree comparator excludes replay states and cannot publish or
+// reuse an alternative. Both traversals authenticate the same syntax and
+// completeness. Without that caller, release every tree inside this function.
+func compactAcceptanceElectionMaterialize(
+	compact *core.Core, parser *Parser, source []byte,
+	forceReplayParseStates bool, contextSet bool,
+	head core.Head, paths []core.Derivation, primary core.Derivation,
+	publicationScratch *parserCoreRunnerScratch,
+) (*Tree, bool) {
 	if len(paths) < 2 {
-		return true
+		return nil, true
 	}
 	if !contextSet || compact == nil || parser == nil {
-		return false
+		return nil, false
 	}
 	// allowErrorRoot is always false here (B3 stage S3, materializeDiagnosticParserCoreAcceptedSelection):
 	// this gate only runs on a clean, non-recovery tied accept, and a
 	// candidate that needs allowErrorRoot=true to materialize is not
 	// something this gate is equipped to reason about -- it fails the trial
 	// materialization, which the fail-closed contract below already treats
-	// as "not proven vacuous". forceReplayParseStates is threaded through
-	// (not hardcoded) so the trial materialization matches the caller's own
-	// post-acceptance one -- see this function's doc comment.
-	primaryTree, err := materializeDiagnosticParserCoreAcceptedSelection(compact, head, primary.Payloads, parser, source, nil, forceReplayParseStates, false)
-	if err != nil {
-		return false
+	// as "not proven vacuous". The caller's replay setting preserves the
+	// table-identity precondition, as described above.
+	// Trials share only transient construction buffers. Public nodes still
+	// belong to distinct arenas, so building an alternative cannot mutate the
+	// reference. Checkpoint copies serve incremental reuse, which no temporary
+	// comparison tree may perform. Syntax and completeness checks remain intact.
+	var comparisonScratch *parserCoreRunnerScratch
+	var publicationBudget *diagnosticParserCoreGenericScheduler
+	if publicationScratch != nil {
+		comparisonScratch = publicationScratch.acceptanceComparison
+		if comparisonScratch == nil || comparisonScratch.materializationRetainedBytes() > parserCoreMaxRetainedComparisonBytes {
+			comparisonScratch = &parserCoreRunnerScratch{}
+			publicationScratch.acceptanceComparison = comparisonScratch
+		}
+		defer func() {
+			if comparisonScratch.materializationRetainedBytes() > parserCoreMaxRetainedComparisonBytes {
+				publicationScratch.acceptanceComparison = nil
+			}
+		}()
+		publicationBudget = publicationScratch.materializationBudgetScheduler
+		comparisonScratch.materializationPurpose = core.MaterializationForComparison
+		if publicationBudget != nil {
+			previous := publicationBudget.options.acceptanceMaterializationScratch
+			publicationBudget.options.acceptanceMaterializationScratch = publicationScratch
+			defer func() { publicationBudget.options.acceptanceMaterializationScratch = previous }()
+		}
+	} else {
+		comparisonScratch = &parserCoreRunnerScratch{materializationPurpose: core.MaterializationForComparison}
 	}
-	defer primaryTree.Release()
+	primaryScratch := comparisonScratch
+	if publicationScratch != nil {
+		primaryScratch = publicationScratch
+	}
+	primaryTree, err := materializeDiagnosticParserCoreAcceptedSelection(compact, head, primary.Payloads, parser, source, primaryScratch, forceReplayParseStates, false)
+	if err != nil {
+		return nil, false
+	}
+	retained := false
+	defer func() {
+		if !retained {
+			primaryTree.Release()
+		}
+	}()
 	primaryRoot := primaryTree.RootNode()
 	for _, candidate := range paths {
 		if slices.Equal(candidate.Payloads, primary.Payloads) {
 			continue
 		}
-		candidateTree, err := materializeDiagnosticParserCoreAcceptedSelection(compact, head, candidate.Payloads, parser, source, nil, forceReplayParseStates, false)
+		if publicationScratch != nil {
+			comparisonScratch.materializationBudgetScheduler = publicationBudget
+			comparisonScratch.materializationReferenceBytes = arenaAllocatedVolume(primaryTree.arena)
+		}
+		candidateTree, err := materializeDiagnosticParserCoreAcceptedSelection(compact, head, candidate.Payloads, parser, source, comparisonScratch, forceReplayParseStates, false)
 		if err != nil {
-			return false
+			return nil, false
 		}
 		equal := compactAcceptanceDerivationTreesEqual(parser.language, primaryRoot, candidateTree.RootNode())
 		candidateTree.Release()
 		if !equal {
-			return false
+			return nil, false
 		}
 	}
-	return true
+	if publicationScratch != nil {
+		retained = true
+		return primaryTree, true
+	}
+	return nil, true
 }
 
 // compactAcceptanceDerivationTreesEqual reports whether two materialized
@@ -11843,7 +12001,9 @@ func (s *diagnosticParserCoreGenericScheduler) publishDropCohortFrontierForReduc
 			return 0, nil
 		}
 		heads[index] = output.Head
-		refs[index] = core.DropCohortRefSet{Inline: [2]core.DropCohortRef{ref}, Count: 1}
+		if !s.compact.AddDropCohortRef(&refs[index], ref) {
+			return 0, nil
+		}
 	}
 	sequence, complete, err := s.publishDropCohortFrontierMembersOwned(
 		owner, uint64(s.electionIndex+1), heads[:len(outputs)], refs[:len(outputs)], nil,
@@ -12096,12 +12256,11 @@ func (s *diagnosticParserCoreGenericScheduler) DiagnosticBindDropCohortReference
 		s.verifierRefs[index] = core.DropCohortRef{
 			Owner: raw[0], Epoch: raw[1], Sequence: raw[2], Branch: branches[index],
 		}
-		s.headers[index].dropCohortRefs = core.DropCohortRefSet{
-			Inline: [2]core.DropCohortRef{{
-				Owner: raw[0], Epoch: raw[1], Sequence: raw[2], Branch: branches[index],
-			}},
-			Count: 1,
+		var refs core.DropCohortRefSet
+		if !s.compact.AddDropCohortRef(&refs, s.verifierRefs[index]) {
+			return errors.New("parser-core phase zero: verifier reference publication failed")
 		}
+		s.headers[index].dropCohortRefs = refs
 	}
 	s.verifierBound = len(handles)
 	if len(s.headers) == 0 {
@@ -12128,7 +12287,8 @@ func (s *diagnosticParserCoreGenericScheduler) diagnosticDropCohortVerifierInput
 	for index := range s.headers {
 		s.verifierHeads[index] = s.headers[index].head
 		bound := s.headers[index].dropCohortRefs
-		if bound.Count != 1 || bound.Spilled() || bound.Inline[0] != s.verifierRefs[index] {
+		ref, valid := s.compact.DropCohortRefAt(bound, 0)
+		if bound.Count != 1 || !valid || ref != s.verifierRefs[index] {
 			return 0, errors.New("parser-core phase zero: verifier reference binding is stale")
 		}
 	}
@@ -12672,6 +12832,10 @@ func (s *diagnosticParserCoreGenericScheduler) reindexCondenseCandidatesOwned(ow
 
 func (s *diagnosticParserCoreGenericScheduler) collectCondenseCandidates(source int) []core.CondenseCandidate {
 	candidates := s.condenseCandidates[:0]
+	// Independent graph expansion belongs to the same diagnostic route as
+	// early scanner ownership. Ordinary routes keep their existing condensation
+	// and fail closed at the ownership guard instead of extending doomed work.
+	independentOwners := core.ExternalLexerOwnershipProbeEnabled() && source >= 0 && source < len(s.headers)
 	if source >= 0 && source < len(s.headers) {
 		sourceHeader := &s.headers[source]
 		if sourceHeader.accepted || sourceHeader.paused ||
@@ -12692,6 +12856,7 @@ func (s *diagnosticParserCoreGenericScheduler) collectCondenseCandidates(source 
 				Head: header.head, DropCohortRefs: header.dropCohortRefs,
 				Shifted: header.shifted, Checkpoint: header.checkpoint, ErrorCost: 0,
 				MergeIdentity: s.condenseCandidateMergeIdentity(index),
+				Independent:   independentOwners && !s.versionLexerStateEqual(s.headers[source].versionState, header.versionState),
 			})
 		}
 		s.condenseCandidates = candidates
@@ -12710,6 +12875,7 @@ func (s *diagnosticParserCoreGenericScheduler) collectCondenseCandidates(source 
 			Head: header.head, DropCohortRefs: header.dropCohortRefs,
 			Shifted: header.shifted, Checkpoint: header.checkpoint, ErrorCost: 0,
 			MergeIdentity: s.condenseCandidateMergeIdentity(index),
+			Independent:   independentOwners && !s.versionLexerStateEqual(s.headers[source].versionState, header.versionState),
 		})
 	}
 	s.condenseCandidates = candidates

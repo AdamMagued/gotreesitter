@@ -132,7 +132,11 @@ func TestSwiftUnsafeWitnessRemainsKnownCStructuralMismatch(t *testing.T) {
 	// grammars.TestSwiftUnsafeWitnessKeepsCurrentGoTreeAcrossRecoveryProbe's
 	// pinned digest for the same file; see that test for the scanner and
 	// C version-order fixes that reduce the known locked-C leaf gap.
-	const wantGoDigest = "a40f6fe0d111f35d3357bf0d7846b957b6474870f8639523485e9d802e2d3a37"
+	// The C-correct scanner-padding rule from c99e9085c changes the Go
+	// recovery tree. The C oracle and the known root-shape gap stay fixed;
+	// TestSwiftDirectiveNewlinesMatchLockedC also covers the clean comment
+	// boundary that regresses if that progress rule is removed.
+	const wantGoDigest = "414e25c9232c5b7e6a659515ff546232eca51d84452f1be06c03b57a933329d4"
 	if goInspection.SHA256 != wantGoDigest {
 		t.Fatalf("Go Swift witness digest = %s, want %s", goInspection.SHA256, wantGoDigest)
 	}
@@ -143,8 +147,10 @@ func TestSwiftUnsafeWitnessRemainsKnownCStructuralMismatch(t *testing.T) {
 	if goInspection.SHA256 == cDigest {
 		t.Fatal("Swift unsafe witness reached C structural parity; ratchet the known-mismatch test")
 	}
-	if diff := FirstDivergenceDumpV1(goRoot, goLang, cRoot); diff == nil {
-		t.Fatal("Swift unsafe witness digest differs without a structural divergence")
+	if diff := FirstDivergenceDumpV1(goRoot, goLang, cRoot); diff == nil ||
+		diff.Path != "/source_file" || diff.Category != "shape" ||
+		diff.GoValue != "children=1" || diff.CValue != "children=353" {
+		t.Fatalf("Swift unsafe witness known root-shape gap changed: %+v", diff)
 	}
 	t.Logf("Swift unsafe witness known C mismatch: Go=%s C=%s", goInspection.SHA256, cDigest)
 }
@@ -295,7 +301,7 @@ func TestSwiftUnsafeMinimalWitnessMatchesLockedCAfterPooledRecoveryControl(t *te
 }
 
 func TestSwiftUnsafeLargeWitnessKeepsDigestAfterPooledRecoveryControl(t *testing.T) {
-	const wantGoDigest = "a40f6fe0d111f35d3357bf0d7846b957b6474870f8639523485e9d802e2d3a37"
+	const wantGoDigest = "414e25c9232c5b7e6a659515ff546232eca51d84452f1be06c03b57a933329d4"
 	const wantCDigest = "dd81933bab64e72135317be11daf77ffd6e15531819f82e8dc15dea1aba1b8be"
 	control := []byte("func f(n: Int) -> Int {\n" +
 		"  var total = 0\n" +

@@ -521,9 +521,12 @@ func requireMaterializationPostorderScratchReset(t *testing.T, scratch *Material
 		}
 	}
 	for index, frame := range scratch.frames[:cap(scratch.frames)] {
-		if frame.record != nil {
-			t.Fatalf("scratch frame %d retained a compact record", index)
+		if frame != (materializationPostorderFrame{}) {
+			t.Fatalf("scratch frame %d retained traversal state", index)
 		}
+	}
+	if scratch.replayView != (MaterializationReplayView{}) {
+		t.Fatal("scratch retained a borrowed replay view")
 	}
 }
 

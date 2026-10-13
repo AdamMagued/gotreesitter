@@ -97,6 +97,81 @@ func TestDiagnosticParserCoreCanonicalScratchCollapsesCanonicalHeads(t *testing.
 	if err != nil || len(out) != 1 || out[0].head != canonical || out[0].creationSeq != 3 {
 		t.Fatalf("canonical collapse output=%+v canonical=%+v err=%v", out, canonical, err)
 	}
+	t.Cleanup(core.SetExternalLexerOwnershipProbeForTest(true))
+	// Equal parser boundaries and checkpoints do not authenticate the pending
+	// lexer request. This is the YAML ownership-conflict shape: the second
+	// reduction published the boundary most recently, but the first remains a
+	// live version with a different request.
+	for _, sameRequest := range []bool{false, true} {
+		snapshot := &diagnosticParserCoreVersionLexerSnapshot{}
+		leftRequest := diagnosticParserCoreVersionLexerRequest{token: Token{Symbol: 7}, valid: true}
+		rightRequest := leftRequest
+		if !sameRequest {
+			rightRequest.token.Symbol = 8
+		}
+		scheduler := &diagnosticParserCoreGenericScheduler{
+			compact:              compact,
+			versionLexerRequests: []diagnosticParserCoreVersionLexerRequest{leftRequest, rightRequest},
+		}
+		headers := []diagnosticParserCoreHeader{
+			{head: stale, creationSeq: 3, versionState: &diagnosticParserCoreVersionState{relexSnapshot: snapshot, lexerRequest: 1}},
+			{head: canonical, creationSeq: 5, versionState: &diagnosticParserCoreVersionState{relexSnapshot: snapshot, lexerRequest: 2}},
+		}
+		scratch.versionStateOwner = scheduler
+		scheduler.headers = headers
+		for _, isolation := range []bool{false, true} {
+			scheduler.recoveryIsolation = isolation
+			for _, probe := range []bool{false, true} {
+				restoreProbe := core.SetExternalLexerOwnershipProbeForTest(probe)
+				candidates := scheduler.collectCondenseCandidates(0)
+				restoreProbe()
+				if len(candidates) != 1 || candidates[0].Head != canonical || candidates[0].Independent != (probe && !sameRequest) {
+					t.Fatalf("condense candidates lost a live owner or expanded the ordinary route: isolation=%t probe=%t equal=%t candidates=%+v", isolation, probe, sameRequest, candidates)
+				}
+			}
+		}
+		if !sameRequest {
+			restoreProbe := core.SetExternalLexerOwnershipProbeForTest(false)
+			ordinary, ordinaryErr := scratch.canonicalize(compact, headers)
+			restoreProbe()
+			if ordinaryErr != nil || len(ordinary) != 2 || ordinary[0].head != canonical || ordinary[1].head != canonical {
+				t.Fatalf("ordinary canonicalization changed: %+v err=%v", ordinary, ordinaryErr)
+			}
+			if err := compact.ApplySchedulerAtomic(func(owner core.SchedulerTransactionToken) error {
+				if err := compact.RecordHeadOwnerOwned(owner, ordinary[0].head, 4); err != nil {
+					return err
+				}
+				return compact.RecordHeadOwnerOwned(owner, ordinary[1].head, 6)
+			}); err == nil {
+				t.Fatal("ordinary route published incompatible owners")
+			}
+		}
+		out, err = scratch.canonicalize(compact, headers)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sameRequest {
+			if len(out) != 1 || out[0].head != canonical {
+				t.Fatalf("equivalent lexer requests did not converge: %+v", out)
+			}
+		} else {
+			if len(out) != 2 || out[0].head != stale || out[1].head != canonical {
+				t.Fatalf("independent lexer requests acquired one physical head: %+v", out)
+			}
+			if err := compact.ApplySchedulerAtomic(func(owner core.SchedulerTransactionToken) error {
+				if err := compact.RecordHeadOwnerOwned(owner, out[0].head, 4); err != nil {
+					return err
+				}
+				return compact.RecordHeadOwnerOwned(owner, out[1].head, 6)
+			}); err != nil {
+				t.Fatalf("independent owners conflict after canonicalization: %v", err)
+			}
+		}
+		out, err = scratch.canonicalize(compact, headers[:1])
+		if err != nil || len(out) != 1 || out[0].head != stale {
+			t.Fatalf("single owned header borrowed an unwitnessed boundary: %+v err=%v", out, err)
+		}
+	}
 }
 
 // TestDiagnosticParserCoreCanonicalScratchSingleHeaderRemapsAndPublishesFresh
@@ -672,11 +747,10 @@ func TestDiagnosticParserCoreCheckpointCompactLayoutsAMD64(t *testing.T) {
 	if runtime.GOARCH != "amd64" {
 		t.Skip("amd64 layout receipt")
 	}
-	// G18 adds two value-owned DropCohortRefSet fields. Each set is 72 bytes.
-	// The exact scheduler header size is 224 bytes. Canonicalization and
-	// rollback copy this header.
-	if got := unsafe.Sizeof(diagnosticParserCoreHeader{}); got != 224 {
-		t.Fatalf("scheduler header size=%d, want 224", got)
+	// The reference set carries an arena view; embedding its two former
+	// inline references would add 56 bytes to every dispatch snapshot.
+	if got := unsafe.Sizeof(diagnosticParserCoreHeader{}); got != 88 {
+		t.Fatalf("scheduler header size=%d, want 88", got)
 	}
 	if got := unsafe.Sizeof(diagnosticParserCorePhaseHead{}); got != 24 {
 		t.Fatalf("canonical phase key size=%d, want 24", got)

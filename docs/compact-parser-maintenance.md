@@ -10,6 +10,7 @@ All compact implementation files use the `!gts_no_parsercorephase0` build constr
 | Project symbol metadata for recovery and materialization | `parsercore_phase0_symbol_policy.go` |
 | Read compact subtrees for recovery pricing | `parsercore_phase0_recovery_cost_source.go` |
 | Compute recovery costs and measure their memo | `internal/parsercorephase0/recovery_cost.go` |
+| Select clean reconverged children within one reduction | `internal/parsercorephase0/reduction_child_selection.go` |
 | Measure compact-core storage | `internal/parsercorephase0/storage_bytes.go` |
 
 ## Add retained state
@@ -25,6 +26,14 @@ Before you add a slice, map, or cache, identify its owner and lifetime.
 The scheduler retains the recovery-cost memo across parses and clears its entries at reset.
 Its allocated capacity still counts after reset.
 The scheduler discards the recovery-symbol projection at reset and rebuilds it when the next parse needs it.
+
+Reduction child selection starts only after frontier pressure in a fresh scheduler
+session. Its pressure flag persists through acceptance and clears at session entry,
+every session exit, and core reset. Selection still requires one reduction batch,
+one graph predecessor, identical terminal and scanner histories, and C's child
+ordering. Recovery, missing nodes, opaque reused subtrees, and exhausted comparison
+budgets retain alternatives. Leaf traversal borrows the finished pop enumerator's
+two buffers; their capacities already count in the core footprint.
 
 ## Change symbol metadata
 

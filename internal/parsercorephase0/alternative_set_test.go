@@ -192,19 +192,20 @@ func TestAlternativeSetOutOfOrderInsertForcesSpillAndStaysSorted(t *testing.T) {
 	compact := &Core{}
 	var set AlternativeSet
 	compact.alternativeSetInsert(&set, 5)
-	compact.alternativeSetInsert(&set, 9)
 	if set.spilled() {
-		t.Fatal("two ascending inserts already spilled")
+		t.Fatal("singleton already spilled")
 	}
-	// 2 is not the new maximum: inserting it in the middle cannot stay a pure
-	// inline tail append, so this must spill even though the result has only
-	// three members (spec.b4b-alternative-set.v1 section 3.3's append-only
-	// byte-level invariant).
+	snapshot := set
+	// Inserting below the maximum must leave the old inline snapshot intact.
 	if !compact.alternativeSetInsert(&set, 2) {
 		t.Fatal("out-of-order insert reported no change")
 	}
 	if !set.spilled() {
 		t.Fatal("out-of-order insert of a non-maximum member did not spill")
+	}
+	compact.alternativeSetInsert(&set, 9)
+	if got := alternativeSetMembersForTest(t, compact, snapshot); !slices.Equal(got, []uint32{5}) {
+		t.Fatalf("earlier snapshot members = %v, want [5]", got)
 	}
 	if got := alternativeSetMembersForTest(t, compact, set); !slices.Equal(got, []uint32{2, 5, 9}) {
 		t.Fatalf("members = %v, want [2 5 9]", got)

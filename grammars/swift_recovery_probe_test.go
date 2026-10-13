@@ -112,7 +112,7 @@ func TestSwiftUnsafeWitnessKeepsCurrentGoTreeAcrossRecoveryProbe(t *testing.T) {
 	// 1007 to 764. Input and C digests, coverage, completion and error flags
 	// stay fixed. The whole-source structural C gap remains tracked by
 	// TestSwiftUnsafeWitnessRemainsKnownCStructuralMismatch.
-	const wantDigest = "a40f6fe0d111f35d3357bf0d7846b957b6474870f8639523485e9d802e2d3a37"
+	const wantDigest = "414e25c9232c5b7e6a659515ff546232eca51d84452f1be06c03b57a933329d4"
 	if inspection.SHA256 != wantDigest {
 		t.Fatalf("Swift unsafe witness digest = %s, want %s", inspection.SHA256, wantDigest)
 	}

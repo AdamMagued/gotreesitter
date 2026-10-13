@@ -55,15 +55,15 @@ func TestCompactFusedReplayMatchesTopDownReplay(t *testing.T) {
 				t.Fatalf("top-down replay: %v", err)
 			}
 			defer expected.release()
-			transition := func(pre core.StateID, view core.MaterializationReplayView) (core.StateID, bool, error) {
+			transition := func(pre core.StateID, view *core.MaterializationReplayView) (core.StateID, bool, error) {
 				state, known, err := runner.parser.replayCompactMaterializationTransition(StateID(pre), view)
 				return core.StateID(state), known, err
 			}
 			var scratch core.MaterializationPostorderScratch
 			visited := 0
-			err = runner.compact.VisitMaterializationPostorderWithReplay(payloads, nil, &scratch,
-				core.StateID(runner.parser.replayRootPreGotoState()), transition,
-				func(id core.SubtreeID, view core.MaterializationSubtreeView) error {
+			err = runner.compact.VisitMaterializationPostorderPrebuiltWithBorrowedReplay(payloads, nil, &scratch,
+				core.StateID(runner.parser.replayRootPreGotoState()), transition, nil,
+				func(id core.SubtreeID, view *core.MaterializationSubtreeView) error {
 					visited++
 					pre, ps, preOk, psOk := expected.get(id)
 					if psOk != view.ReplayParseStateKnown || preOk != view.ReplayPreGotoKnown ||

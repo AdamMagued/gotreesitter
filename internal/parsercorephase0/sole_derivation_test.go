@@ -43,6 +43,17 @@ func newSoleDerivationBranches() (*Core, Head) {
 func compareSoleDerivation(t *testing.T, c *Core, head Head) (Derivation, bool, error) {
 	t.Helper()
 	want, wantErr := c.Derivations(head)
+	var scratch DerivationScratch
+	borrowed, borrowedErr := c.DerivationsWithScratch(head, &scratch, nil)
+	if (borrowedErr == nil) != (wantErr == nil) ||
+		borrowedErr != nil && borrowedErr.Error() != wantErr.Error() ||
+		errors.Is(borrowedErr, ErrDerivationEnumerationCap) != errors.Is(wantErr, ErrDerivationEnumerationCap) {
+		t.Fatalf("borrowed error=%v, enumeration error=%v", borrowedErr, wantErr)
+	}
+	if borrowedErr == nil && !reflect.DeepEqual(borrowed, want) {
+		t.Fatalf("borrowed derivations=%+v, enumeration=%+v", borrowed, want)
+	}
+	scratch.Reset()
 	got, sole, err := c.SoleDerivation(head)
 	if (err == nil) != (wantErr == nil) {
 		t.Fatalf("sole error=%v, enumeration error=%v", err, wantErr)

@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"math"
 	"reflect"
 	"unsafe"
@@ -60,16 +59,7 @@ type diagnosticParserCoreVersionLexerScannerContract struct {
 }
 
 func diagnosticParserCoreVersionLexerScannerFingerprint(scanner ExternalScanner) [32]byte {
-	if scanner == nil {
-		return [32]byte{}
-	}
-	typeID := reflect.TypeOf(scanner)
-	// Pointer scanners carry their identity in the pointer. Avoid hashing their
-	// mutable pointee, because scanner state belongs in Create's payload.
-	if value := reflect.ValueOf(scanner); value.IsValid() && value.Kind() == reflect.Pointer {
-		return sha256.Sum256([]byte(fmt.Sprintf("%s@%x", typeID, value.Pointer())))
-	}
-	return sha256.Sum256([]byte(fmt.Sprintf("%T:%#v", scanner, scanner)))
+	return core.ScannerFingerprint(scanner)
 }
 
 func diagnosticParserCoreVersionLexerScannerContractForLanguage(language *Language) (diagnosticParserCoreVersionLexerScannerContract, error) {
@@ -399,12 +389,17 @@ func validateDiagnosticParserCoreVersionLexerCheckpoint(
 	if compact == nil {
 		return errors.New("parser-core phase zero: version lexer checkpoint has no core")
 	}
-	if info != parserCoreCheckpoint(bytes) {
+	if info.Length != len(bytes) {
 		return errors.New("parser-core phase zero: version lexer checkpoint metadata does not match its bytes")
 	}
 	length, digest, ok := compact.CheckpointReceipt(id)
 	if !ok || uint64(len(bytes)) != uint64(length) || digest != info.SHA256 {
 		return errDiagnosticParserCoreUnknownCheckpointIdentity
+	}
+	// The interner owns the authenticated bytes. Exact comparison checks the
+	// immutable copy without hashing it again at every action classification.
+	if !compact.CheckpointMatches(id, bytes) {
+		return errors.New("parser-core phase zero: version lexer checkpoint metadata does not match its bytes")
 	}
 	return nil
 }

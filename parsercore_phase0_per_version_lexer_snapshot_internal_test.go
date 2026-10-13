@@ -759,6 +759,34 @@ func TestDiagnosticParserCoreVersionLexerSnapshotRejectsScannerReplacement(t *te
 	}
 }
 
+func TestDiagnosticParserCoreVersionLexerSnapshotRejectsChangedCheckpointCopies(t *testing.T) {
+	_, original := newDiagnosticParserCoreVersionLexerTestSnapshot(t)
+	for _, test := range []struct {
+		name   string
+		mutate func(*diagnosticParserCoreVersionLexerSnapshot)
+	}{
+		{"before_bytes", func(s *diagnosticParserCoreVersionLexerSnapshot) { s.beforeCheckpointBytes[0] ^= 1 }},
+		{"after_bytes", func(s *diagnosticParserCoreVersionLexerSnapshot) { s.afterCheckpointBytes[0] ^= 1 }},
+		{"length", func(s *diagnosticParserCoreVersionLexerSnapshot) { s.beforeCheckpointInfo.Length++ }},
+		{"digest", func(s *diagnosticParserCoreVersionLexerSnapshot) { s.afterCheckpointInfo.SHA256[0] ^= 1 }},
+		{"forged_copy_and_receipt", func(s *diagnosticParserCoreVersionLexerSnapshot) {
+			s.beforeCheckpointBytes[0] ^= 1
+			s.beforeCheckpointInfo = parserCoreCheckpoint(s.beforeCheckpointBytes)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := original.clone()
+			test.mutate(snapshot)
+			if err := snapshot.validate(); err == nil {
+				t.Fatal("changed checkpoint copy was accepted")
+			}
+		})
+	}
+	if err := original.validate(); err != nil {
+		t.Fatalf("private-copy checks changed the original snapshot: %v", err)
+	}
+}
+
 func TestDiagnosticParserCoreVersionLexerSnapshotBindsCheckpointIdentity(t *testing.T) {
 	compact, before, after := newDiagnosticParserCoreVersionLexerTestCore(t)
 	scanner := newC26lCheckpointScanner()

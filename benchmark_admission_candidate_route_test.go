@@ -5,22 +5,201 @@ package gotreesitter_test
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/odvcencio/gotreesitter/internal/benchfixtures"
+	core "github.com/odvcencio/gotreesitter/internal/parsercorephase0"
 )
+
+// These benchmarks include declined compact attempts in route timing.
+// Select exactly one language per process with GTS_ADMISSION_REAL_CORPUS_LANGS.
+// The committed R4 source and its digest are shared with the invariant gate.
+func BenchmarkAdmissionR4Legacy(b *testing.B)  { benchmarkAdmissionR4(b, false) }
+func BenchmarkAdmissionR4Compact(b *testing.B) { benchmarkAdmissionR4(b, true) }
+
+// BenchmarkAdmissionR4OwnedExternalLexer measures completed parses through the
+// diagnostic ownership activation. Keep it separate from shipped-route timing.
+func BenchmarkAdmissionR4OwnedExternalLexer(b *testing.B) {
+	b.Cleanup(core.SetExternalLexerOwnershipProbeForTest(true))
+	benchmarkAdmissionR4(b, true)
+	if routed, fallback := gotreesitter.AdmissionCandidateCounters(); routed != uint64(b.N) || fallback != 0 {
+		b.Fatalf("owned lexer benchmark did not stay on compact: routed=%d fallback=%d", routed, fallback)
+	}
+}
+
+func admissionYAMLDocumentStreamSample(tb testing.TB) []byte {
+	tb.Helper()
+	sample, err := os.ReadFile("internal/benchfixtures/testdata/real/yaml")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	sum := sha256.Sum256(sample)
+	if len(sample) != 1998 || hex.EncodeToString(sum[:]) != "5aa2c70bccfe73254f13eca40476c3f88f522c6a47aea499f9d672dbc5aae8c4" {
+		tb.Fatal("YAML R4 sample identity changed")
+	}
+	return sample
+}
+
+// Keep the original owned sample's work pinned while resolving wider forests.
+func TestCompactYAMLReductionSelectionPreservesSampleWork(t *testing.T) {
+	t.Cleanup(core.SetExternalLexerOwnershipProbeForTest(true))
+	p := gotreesitter.NewParser(grammars.YamlLanguage())
+	p.SetAdmissionCandidateRoute(true)
+	source := admissionYAMLDocumentStreamSample(t)
+	// Reuse the parser after a pressured session: the next fresh parse must
+	// retain the original sample's work contract.
+	document := append([]byte("---\n"), source...)
+	document = append(document, '\n')
+	warm, err := p.Parse(bytes.Repeat(document, 4))
+	if err != nil || warm == nil || warm.RootNode() == nil {
+		t.Fatalf("document stream: %v", err)
+	}
+	warm.Release()
+	gotreesitter.ResetAdmissionCandidateCountersForTest()
+	tree, err := p.Parse(source)
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if routed, fallback := gotreesitter.AdmissionCandidateCounters(); routed != 1 || fallback != 0 {
+		t.Fatalf("owned sample route=%d fallback=%d", routed, fallback)
+	}
+	if runtime := tree.ParseRuntime(); runtime.NodesAllocated > 484 || tree.RootNode().HasError() || tree.RootNode().EndByte() != uint32(len(source)) {
+		t.Fatalf("owned sample work or coverage changed: %+v", runtime)
+	}
+}
+
+// Include the baseline's failed compact attempt and legacy fallback in timing.
+// The locked-C regression pins the same 8 KiB source independently.
+func BenchmarkAdmissionYAMLDocumentStreamOwned(b *testing.B) {
+	b.Cleanup(core.SetExternalLexerOwnershipProbeForTest(true))
+	document := append([]byte("---\n"), admissionYAMLDocumentStreamSample(b)...)
+	document = append(document, '\n')
+	source := bytes.Repeat(document, 4)
+	sum := sha256.Sum256(source)
+	if len(source) != 8012 || hex.EncodeToString(sum[:]) != "778d1dec01bef4da1cef26acff6b8012c9701a23af67bdb9511b419912f04400" {
+		b.Fatal("YAML EOF witness identity changed")
+	}
+	p := gotreesitter.NewParser(grammars.YamlLanguage())
+	p.SetAdmissionCandidateRoute(true)
+	parse := func() {
+		tree, err := p.Parse(source)
+		if err != nil || tree == nil || tree.RootNode() == nil {
+			b.Fatalf("parse: %v", err)
+		}
+		if tree.RootNode().HasError() || tree.RootNode().EndByte() != uint32(len(source)) {
+			b.Fatal("document stream is incomplete or erroneous")
+		}
+		tree.Release()
+	}
+	parse()
+	gotreesitter.ResetAdmissionCandidateCountersForTest()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(source)))
+	b.ResetTimer()
+	for range b.N {
+		parse()
+	}
+	b.StopTimer()
+	routed, fallback := gotreesitter.AdmissionCandidateCounters()
+	if routed+fallback != uint64(b.N) {
+		b.Fatal("inconsistent document-stream route counters")
+	}
+	b.ReportMetric(float64(routed)/float64(b.N), "compact-routes/op")
+	b.ReportMetric(float64(fallback)/float64(b.N), "compact-fallbacks/op")
+}
+
+func benchmarkAdmissionR4(b *testing.B, compact bool) {
+	name := strings.TrimSpace(os.Getenv("GTS_ADMISSION_REAL_CORPUS_LANGS"))
+	if name == "" {
+		b.Skip("set GTS_ADMISSION_REAL_CORPUS_LANGS to one R4 language")
+	}
+	entry := grammars.DetectLanguageByName(name)
+	if entry == nil || strings.Contains(name, ",") {
+		b.Fatal("select exactly one registered R4 language")
+	}
+	raw, err := os.ReadFile(filepath.Join("internal", "benchfixtures", "real_corpus.json"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	var manifest v1InvariantCorpusManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		b.Fatal(err)
+	}
+	var source []byte
+	for _, row := range manifest.Entries {
+		if row.Language != name || row.Role != "sample" || row.CommittedPath == "" {
+			continue
+		}
+		source, err = os.ReadFile(filepath.Join("internal", "benchfixtures", row.CommittedPath))
+		if err != nil {
+			b.Fatal(err)
+		}
+		sum := sha256.Sum256(source)
+		if len(source) != row.Bytes || hex.EncodeToString(sum[:]) != row.SHA256 {
+			b.Fatal("R4 sample identity changed")
+		}
+		break
+	}
+	if len(source) == 0 {
+		b.Fatal("language has no committed real R4 sample")
+	}
+	lang := entry.Language()
+	parser := gotreesitter.NewParser(lang)
+	parser.SetAdmissionCandidateRoute(compact)
+	parse := func() (*gotreesitter.Tree, error) {
+		if entry.TokenSourceFactory != nil {
+			return parser.ParseWithTokenSource(source, entry.TokenSourceFactory(source, lang))
+		}
+		return parser.Parse(source)
+	}
+	warm, err := parse()
+	if err != nil || warm == nil || warm.RootNode() == nil {
+		b.Fatalf("warm parse: tree=%v err=%v", warm != nil, err)
+	}
+	warm.Release()
+	gotreesitter.ResetAdmissionCandidateCountersForTest()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(source)))
+	b.ResetTimer()
+	for range b.N {
+		tree, err := parse()
+		if err != nil || tree == nil {
+			b.Fatalf("timed parse: tree=%v err=%v", tree != nil, err)
+		}
+		tree.Release()
+	}
+	b.StopTimer()
+	routed, fallback := gotreesitter.AdmissionCandidateCounters()
+	b.ReportMetric(float64(routed)/float64(b.N), "compact-routes/op")
+	b.ReportMetric(float64(fallback)/float64(b.N), "compact-fallbacks/op")
+}
 
 // BenchmarkAdmissionCandidateGoQueryCompileWarmRoute measures the public,
 // warmed compact admission route on a fixed Go source. The route counters are
 // reported after the timed loop. They prove every measured parse used the
 // compact scheduler and that no parse fell back to production.
 func BenchmarkAdmissionCandidateGoQueryCompileWarmRoute(b *testing.B) {
+	benchmarkAdmissionCandidateGoQueryCompile(b, false)
+}
+
+// This is a fresh public Parser per file, with one shared immutable Language.
+// It measures the setup cost paid by callers that do not keep a Parser pool.
+func BenchmarkAdmissionCandidateGoQueryCompileNewParser(b *testing.B) {
+	benchmarkAdmissionCandidateGoQueryCompile(b, true)
+}
+
+func benchmarkAdmissionCandidateGoQueryCompile(b *testing.B, newParser bool) {
 	fixtures, err := benchfixtures.LoadGoFullParseFixtures()
 	if err != nil {
 		b.Fatal(err)
@@ -53,6 +232,10 @@ func BenchmarkAdmissionCandidateGoQueryCompileWarmRoute(b *testing.B) {
 	b.SetBytes(int64(len(source)))
 	b.ResetTimer()
 	for range b.N {
+		if newParser {
+			parser = gotreesitter.NewParser(grammars.GoLanguage())
+			parser.SetAdmissionCandidateRoute(true)
+		}
 		tree, parseErr := parser.Parse(source)
 		if parseErr != nil || tree == nil || tree.RootNode() == nil {
 			b.Fatalf("compact timed parse failed: tree=%v err=%v", tree != nil, parseErr)

@@ -187,20 +187,20 @@ func TestCompactBorrowedMaterializationReplayChecksTransition(t *testing.T) {
 		ParseTable: [][]uint16{nil, nil, nil, nil, {0, 0, 0, 7}},
 	}}
 	view := core.MaterializationReplayView{Symbol: 3, ReusedKey: 1, ReusedPreGotoState: 4, ReusedState: 7}
-	state, known, err := parser.replayCompactMaterializationTransition(4, view)
+	state, known, err := parser.replayCompactMaterializationTransition(4, &view)
 	if err != nil || !known || state != 7 {
 		t.Fatalf("borrowed replay: state=%d known=%t error=%v", state, known, err)
 	}
 	view.ReusedPreGotoState = 3
-	if _, _, err := parser.replayCompactMaterializationTransition(4, view); err == nil {
+	if _, _, err := parser.replayCompactMaterializationTransition(4, &view); err == nil {
 		t.Fatal("borrowed replay accepted a mismatched parent state")
 	}
 	view.ReusedPreGotoState, view.ReusedState = 4, 6
-	if _, _, err := parser.replayCompactMaterializationTransition(4, view); err == nil {
+	if _, _, err := parser.replayCompactMaterializationTransition(4, &view); err == nil {
 		t.Fatal("borrowed replay accepted a mismatched goto state")
 	}
 	view.ReusedState, view.Terminal = 7, true
-	if _, _, err := parser.replayCompactMaterializationTransition(4, view); err == nil {
+	if _, _, err := parser.replayCompactMaterializationTransition(4, &view); err == nil {
 		t.Fatal("borrowed replay accepted a terminal classification")
 	}
 }

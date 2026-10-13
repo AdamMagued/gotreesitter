@@ -95,6 +95,13 @@ var builtinLanguageRuntimeProfiles = map[string]builtinLanguageRuntimeProfile{
 		compactPackedGSSVersionOrder: true,
 		conflictActionVersionOrder:   true,
 	},
+	// TSX generic calls must keep the last conflict action's source-version
+	// priority when a later declaration reconverges their packed histories.
+	// Issue #1443 certifies the conflict rule without packed reduction ordering.
+	"tsx": {
+		blobSHA256:                 mustRuntimeProfileSHA256("419002e62f0bbaf9a7f7bdc0fbe58799bf6ca94038550ccde33695c16859d984"),
+		conflictActionVersionOrder: true,
+	},
 	// The Agda table's repetition shift at state 4039 on `id` must decline so
 	// the parser can reduce `_atoms` and finish the function head. Tree-sitter's
 	// C runtime stops on repetition shifts in conflicts, so this exact-blob

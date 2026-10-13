@@ -251,7 +251,9 @@ func TestBuiltinRuntimeProfilesStayNarrow(t *testing.T) {
 	// 58 adds SQL's exact-blob missing-version-turn certification (2/4 to 4/4).
 	// 59 retains Gleam's exact-blob negative-integer grant from main.
 	// The locked fresh set improves from 3/4 to 4/4 without counter changes.
-	if got, want := len(builtinLanguageRuntimeProfiles), 59; got != want {
+	// 60 adds TSX's exact-blob conflict-action priority grant (#1443),
+	// without enabling its broader packed-reduction transaction ordering.
+	if got, want := len(builtinLanguageRuntimeProfiles), 60; got != want {
 		t.Fatalf("builtinLanguageRuntimeProfiles has %d entries, want %d", got, want)
 	}
 	lang := &gotreesitter.Language{ExternalScanner: KotlinExternalScanner{}}
@@ -1712,14 +1714,15 @@ func TestRecoveryMissingVersionTurnsRequireExactBlob(t *testing.T) {
 
 func TestBuiltinConflictActionVersionOrderRequiresExactBlobIdentity(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		load func() *gotreesitter.Language
-	}{{"typescript", TypescriptLanguage}, {"dart", DartLanguage}} {
+		name        string
+		load        func() *gotreesitter.Language
+		packedOrder bool
+	}{{"typescript", TypescriptLanguage, true}, {"dart", DartLanguage, true}, {"tsx", TsxLanguage, false}} {
 		name := tc.name
 		t.Run(name, func(t *testing.T) {
 			builtin := tc.load()
-			if builtin == nil || !builtin.ConflictActionVersionOrderCertified || !builtin.CompactPackedGSSVersionOrderCertified {
-				t.Fatal("exact artifact must certify its conflict and reduction ordering")
+			if builtin == nil || !builtin.ConflictActionVersionOrderCertified || builtin.CompactPackedGSSVersionOrderCertified != tc.packedOrder {
+				t.Fatal("exact artifact must certify only its proven conflict and reduction ordering")
 			}
 			custom := &gotreesitter.Language{Name: name}
 			AttachLanguageSupport(name, custom)
