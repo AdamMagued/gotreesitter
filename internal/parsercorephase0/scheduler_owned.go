@@ -262,10 +262,11 @@ func (c *Core) recordNodeLineageSet(head Head, set AlternativeSet, setBlended bo
 	before := node.set
 	beforeBlended := node.blended
 	incomparable := c.AlternativeSetIncomparable(before, set)
-	if !c.alternativeSetUnion(&node.set, set) {
+	setChanged := c.alternativeSetUnion(&node.set, set)
+	nextBlended := beforeBlended || setBlended || incomparable
+	if !setChanged && nextBlended == beforeBlended {
 		return nil
 	}
-	nextBlended := beforeBlended || setBlended || incomparable
 	if len(c.transactions) != 0 {
 		c.nodeLineageJournal = append(c.nodeLineageJournal, nodeLineageMutation{
 			node: head.Node, owner: node.owner, dropCohortRefIndex: node.dropCohortRefIndex,

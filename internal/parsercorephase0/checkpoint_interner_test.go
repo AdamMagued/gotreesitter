@@ -293,3 +293,45 @@ func TestCheckpointCompactLayoutsAMD64(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckpointPrivateCopyMatchPreservesMetadataAndExactBytes(t *testing.T) {
+	compact, err := New(&fakeTable{}, Limits{MaxCheckpoints: 4, MaxCheckpointBytes: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := []byte{4, 5, 6}
+	id := mustInternCheckpoint(t, compact, state)
+	digest := sha256.Sum256(state)
+	wrongDigest := digest
+	wrongDigest[0] ^= 1
+	for _, test := range []struct {
+		name    string
+		id      CheckpointID
+		private []byte
+		digest  *[32]byte
+		want    CheckpointCopyMatch
+	}{
+		{"exact", id, state, &digest, CheckpointCopyExact},
+		{"changed_bytes", id, []byte{4, 5, 7}, &digest, CheckpointCopyChanged},
+		{"wrong_length", id, state[:2], &digest, CheckpointCopyUnknown},
+		{"forged_digest", id, state, &wrongDigest, CheckpointCopyUnknown},
+		{"missing_digest", id, state, nil, CheckpointCopyUnknown},
+		{"unknown_id", 99, state, &digest, CheckpointCopyUnknown},
+		{"empty", 0, nil, &emptyCheckpointDigest, CheckpointCopyExact},
+		{"nonempty_zero", 0, state, &emptyCheckpointDigest, CheckpointCopyUnknown},
+		{"nonempty_zero_digest", 0, nil, &digest, CheckpointCopyUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := compact.MatchCheckpointPrivateCopy(test.id, test.private, test.digest); got != test.want {
+				t.Fatalf("match=%v,want %v", got, test.want)
+			}
+		})
+	}
+	compact.checkpoints.records[id-1].offset = ^uint32(0)
+	if got := compact.MatchCheckpointPrivateCopy(id, state, &digest); got != CheckpointCopyChanged {
+		t.Fatalf("malformed span match=%v", got)
+	}
+	if got := (*Core)(nil).MatchCheckpointPrivateCopy(id, state, &digest); got != CheckpointCopyUnknown {
+		t.Fatalf("nil core match=%v", got)
+	}
+}

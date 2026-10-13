@@ -976,3 +976,66 @@ func TestRecordNodeLineageSetIncomparableUnionMarksBlended(t *testing.T) {
 		t.Fatal("unioning an incomparable set must mark the node record blended")
 	}
 }
+
+func TestRecordHeadLineageOwnedBlendedOnlyUpdateAndRollback(t *testing.T) {
+	defer SetAlternativeSetRecordingEnabledForTest(true)()
+	compact := newTinyCore(t, 4)
+	head, err := compact.Seed(1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := NewAlternativeSetMember(5, 0)
+	if err := compact.ApplySchedulerAtomic(func(owner SchedulerTransactionToken) error {
+		return compact.RecordHeadLineageOwned(owner, head, CleanPathRankUnselected, 5, set, false, true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rollback := errors.New("rollback blended-only update")
+	err = compact.ApplySchedulerAtomic(func(owner SchedulerTransactionToken) error {
+		if err := compact.RecordHeadLineageOwned(owner, head, CleanPathRankUnselected, 5, set, true, true); err != nil {
+			return err
+		}
+		record, err := compact.nodeLineage(head.Node)
+		if err != nil {
+			return err
+		}
+		if !record.blended {
+			t.Fatal("unchanged membership discarded the new blended marker")
+		}
+		return rollback
+	})
+	if !errors.Is(err, rollback) {
+		t.Fatalf("rollback result=%v", err)
+	}
+	record, err := compact.nodeLineage(head.Node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.blended || record.set != set {
+		t.Fatal("rollback did not restore exact membership and prior blended state")
+	}
+	if err := compact.ApplySchedulerAtomic(func(owner SchedulerTransactionToken) error {
+		return compact.RecordHeadLineageOwned(owner, head, CleanPathRankUnselected, 5, set, true, true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	record, err = compact.nodeLineage(head.Node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.blended || record.set != set {
+		t.Fatal("committed blended-only update changed membership or lost its marker")
+	}
+	if err := compact.ApplySchedulerAtomic(func(owner SchedulerTransactionToken) error {
+		return compact.RecordHeadLineageOwned(owner, head, CleanPathRankUnselected, 5, set, false, true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	record, err = compact.nodeLineage(head.Node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.blended {
+		t.Fatal("later unblended input cleared the permanent marker")
+	}
+}

@@ -380,10 +380,10 @@ func validateDiagnosticParserCoreVersionLexerCheckpoint(
 	compact *core.Core,
 	id core.CheckpointID,
 	bytes []byte,
-	info DiagnosticParserCoreScannerCheckpoint,
+	info *DiagnosticParserCoreScannerCheckpoint,
 ) error {
 	if id == 0 {
-		if len(bytes) != 0 || info != parserCoreEmptyCheckpoint {
+		if len(bytes) != 0 || *info != parserCoreEmptyCheckpoint {
 			return errors.New("parser-core phase zero: version lexer empty checkpoint metadata changed")
 		}
 		return nil
@@ -394,13 +394,11 @@ func validateDiagnosticParserCoreVersionLexerCheckpoint(
 	if info.Length != len(bytes) {
 		return errors.New("parser-core phase zero: version lexer checkpoint metadata does not match its bytes")
 	}
-	length, digest, ok := compact.CheckpointReceipt(id)
-	if !ok || uint64(len(bytes)) != uint64(length) || digest != info.SHA256 {
+	match := compact.MatchCheckpointPrivateCopy(id, bytes, &info.SHA256)
+	if match == core.CheckpointCopyUnknown {
 		return errDiagnosticParserCoreUnknownCheckpointIdentity
 	}
-	// The interner owns the authenticated bytes. Exact comparison checks the
-	// immutable copy without hashing it again at every action classification.
-	if !compact.CheckpointMatches(id, bytes) {
+	if match != core.CheckpointCopyExact {
 		return errors.New("parser-core phase zero: version lexer checkpoint metadata does not match its bytes")
 	}
 	return nil
@@ -415,10 +413,10 @@ func (s *diagnosticParserCoreVersionLexerSnapshot) validate() error {
 	if err := s.validateDestination(s.compact, s.language); err != nil {
 		return err
 	}
-	if err := validateDiagnosticParserCoreVersionLexerCheckpoint(s.compact, s.beforeCheckpoint, s.beforeCheckpointBytes, s.beforeCheckpointInfo); err != nil {
+	if err := validateDiagnosticParserCoreVersionLexerCheckpoint(s.compact, s.beforeCheckpoint, s.beforeCheckpointBytes, &s.beforeCheckpointInfo); err != nil {
 		return err
 	}
-	return validateDiagnosticParserCoreVersionLexerCheckpoint(s.compact, s.afterCheckpoint, s.afterCheckpointBytes, s.afterCheckpointInfo)
+	return validateDiagnosticParserCoreVersionLexerCheckpoint(s.compact, s.afterCheckpoint, s.afterCheckpointBytes, &s.afterCheckpointInfo)
 }
 
 func (h *diagnosticParserCoreHeader) installVersionLexerSnapshot(snapshot *diagnosticParserCoreVersionLexerSnapshot) {
@@ -522,10 +520,10 @@ func (s *diagnosticParserCoreVersionLexerSnapshot) restore(compact *core.Core, d
 	if len(s.dfa.externalPayload) > externalScannerSerializationBufferSize {
 		return errors.New("parser-core phase zero: version lexer snapshot target scanner state exceeds its bound")
 	}
-	if err := validateDiagnosticParserCoreVersionLexerCheckpoint(s.compact, s.beforeCheckpoint, s.beforeCheckpointBytes, s.beforeCheckpointInfo); err != nil {
+	if err := validateDiagnosticParserCoreVersionLexerCheckpoint(s.compact, s.beforeCheckpoint, s.beforeCheckpointBytes, &s.beforeCheckpointInfo); err != nil {
 		return err
 	}
-	if err := validateDiagnosticParserCoreVersionLexerCheckpoint(s.compact, s.afterCheckpoint, s.afterCheckpointBytes, s.afterCheckpointInfo); err != nil {
+	if err := validateDiagnosticParserCoreVersionLexerCheckpoint(s.compact, s.afterCheckpoint, s.afterCheckpointBytes, &s.afterCheckpointInfo); err != nil {
 		return err
 	}
 	s.dfa.restore(d)
