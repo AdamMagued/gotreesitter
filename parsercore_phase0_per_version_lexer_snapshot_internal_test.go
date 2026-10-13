@@ -918,3 +918,48 @@ func TestDiagnosticParserCoreVersionLexerSnapshotAcceptsSameContractIDZero(t *te
 		t.Fatalf("same-contract ID-zero publication failed: %v", err)
 	}
 }
+
+func TestDiagnosticParserCoreVersionLexerSnapshotSharedPrivateCheckpointOwnership(t *testing.T) {
+	compact, _, after := newDiagnosticParserCoreVersionLexerTestCore(t)
+	original, ok := compact.CopyCheckpointBytes(after, nil)
+	if !ok {
+		t.Fatal("checkpoint bytes unavailable")
+	}
+	dfa := diagnosticParserCoreVersionLexerTestDFA()
+	dfa.externalScannerPresent = true
+	dfa.externalPayload = append([]byte(nil), original...)
+	language := &Language{Name: "snapshot-test", ExternalScanner: byteStateExternalScanner{}}
+	var snapshot *diagnosticParserCoreVersionLexerSnapshot
+	if err := compact.ApplySchedulerAtomic(func(owner core.SchedulerTransactionToken) error {
+		var err error
+		snapshot, err = newDiagnosticParserCoreVersionLexerSnapshot(compact, language, owner, dfa, after, after)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dfa.externalPayload[0] ^= 1
+	if err := snapshot.validate(); err != nil {
+		t.Fatalf("source mutation reached snapshot: %v", err)
+	}
+	clone := snapshot.clone()
+	snapshot.afterCheckpointBytes[0] ^= 1
+	// Forge the private receipts as well: the independent interner must still
+	// reject tampering when all three private views originally represented the
+	// same scanner state.
+	snapshot.beforeCheckpointInfo = parserCoreCheckpoint(snapshot.beforeCheckpointBytes)
+	snapshot.afterCheckpointInfo = parserCoreCheckpoint(snapshot.afterCheckpointBytes)
+	if err := snapshot.validate(); err == nil {
+		t.Fatal("tampered private state matched authoritative checkpoint")
+	}
+	if err := clone.validate(); err != nil {
+		t.Fatalf("snapshot mutation reached clone: %v", err)
+	}
+	retained, ok := compact.CopyCheckpointBytes(after, nil)
+	if !ok || !bytes.Equal(retained, original) {
+		t.Fatal("snapshot mutation reached checkpoint interner")
+	}
+	clone.dfa.externalPayload[0] ^= 1
+	if !bytes.Equal(retained, original) {
+		t.Fatal("clone mutation reached copied checkpoint bytes")
+	}
+}

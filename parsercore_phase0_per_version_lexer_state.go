@@ -4,7 +4,6 @@ package gotreesitter
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"errors"
 	"math"
 	"reflect"
@@ -244,31 +243,23 @@ func copyDiagnosticParserCoreVersionCheckpoint(
 	owner core.SchedulerTransactionToken,
 	id core.CheckpointID,
 ) ([]byte, DiagnosticParserCoreScannerCheckpoint, error) {
+	return copyDiagnosticParserCoreVersionCheckpointWithPrivateCopy(compact, owner, id, nil)
+}
+
+func copyDiagnosticParserCoreVersionCheckpointWithPrivateCopy(
+	compact *core.Core,
+	owner core.SchedulerTransactionToken,
+	id core.CheckpointID,
+	private []byte,
+) ([]byte, DiagnosticParserCoreScannerCheckpoint, error) {
 	if compact == nil {
 		return nil, DiagnosticParserCoreScannerCheckpoint{}, errors.New("parser-core phase zero: version lexer checkpoint requires a core")
 	}
-	if id == 0 {
-		// Checkpoint ID zero means that the scanner has no serialized state.
-		// Authenticate the owner even when no bytes need copying. Keep its
-		// metadata explicit so callers can distinguish it from a missing
-		// non-zero checkpoint identity.
-		if _, _, ok := compact.CheckpointReceiptOwned(owner, id); !ok {
-			return nil, DiagnosticParserCoreScannerCheckpoint{}, errDiagnosticParserCoreUnknownCheckpointIdentity
-		}
-		return nil, parserCoreEmptyCheckpoint, nil
-	}
-	length, digest, ok := compact.CheckpointReceiptOwned(owner, id)
+	copy, ok := compact.PrivateCheckpointCopyOwned(owner, id, private)
 	if !ok {
 		return nil, DiagnosticParserCoreScannerCheckpoint{}, errDiagnosticParserCoreUnknownCheckpointIdentity
 	}
-	bytes, ok := compact.CopyCheckpointBytesOwned(owner, id, nil)
-	if !ok || uint64(len(bytes)) != uint64(length) {
-		return nil, DiagnosticParserCoreScannerCheckpoint{}, errors.New("parser-core phase zero: version lexer checkpoint bytes are unavailable")
-	}
-	if sha256.Sum256(bytes) != digest {
-		return nil, DiagnosticParserCoreScannerCheckpoint{}, errors.New("parser-core phase zero: version lexer checkpoint digest does not match its bytes")
-	}
-	return bytes, DiagnosticParserCoreScannerCheckpoint{Length: int(length), SHA256: digest}, nil
+	return copy.Bytes, DiagnosticParserCoreScannerCheckpoint{Length: int(copy.Length), SHA256: copy.SHA256}, nil
 }
 
 // newDiagnosticParserCoreVersionLexerSnapshot creates an owned snapshot from
@@ -293,11 +284,22 @@ func newDiagnosticParserCoreVersionLexerSnapshot(
 	if scanner.present && len(dfa.externalPayload) == 0 && !scanner.stateless {
 		return nil, errors.New("parser-core phase zero: version lexer snapshot cannot represent external scanner state")
 	}
-	beforeBytes, beforeInfo, err := copyDiagnosticParserCoreVersionCheckpoint(compact, owner, beforeCheckpoint)
+	// Authenticate both handles before allocating the private DFA copy.
+	if compact == nil {
+		return nil, errors.New("parser-core phase zero: version lexer checkpoint requires a core")
+	}
+	if _, _, ok := compact.CheckpointReceiptOwned(owner, beforeCheckpoint); !ok {
+		return nil, errDiagnosticParserCoreUnknownCheckpointIdentity
+	}
+	if _, _, ok := compact.CheckpointReceiptOwned(owner, afterCheckpoint); !ok {
+		return nil, errDiagnosticParserCoreUnknownCheckpointIdentity
+	}
+	dfa = cloneDiagnosticParserCoreDFARelexSnapshot(dfa)
+	afterBytes, afterInfo, err := copyDiagnosticParserCoreVersionCheckpointWithPrivateCopy(compact, owner, afterCheckpoint, dfa.externalPayload)
 	if err != nil {
 		return nil, err
 	}
-	afterBytes, afterInfo, err := copyDiagnosticParserCoreVersionCheckpoint(compact, owner, afterCheckpoint)
+	beforeBytes, beforeInfo, err := copyDiagnosticParserCoreVersionCheckpointWithPrivateCopy(compact, owner, beforeCheckpoint, afterBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +319,7 @@ func newDiagnosticParserCoreVersionLexerSnapshot(
 		checkpointIdentity:         checkpointIdentity,
 		checkpointIdentityRequired: checkpointIdentityRequired,
 		checkpointIdentityValid:    checkpointIdentityValid,
-		dfa:                        cloneDiagnosticParserCoreDFARelexSnapshot(dfa),
+		dfa:                        dfa,
 		beforeCheckpoint:           beforeCheckpoint,
 		afterCheckpoint:            afterCheckpoint,
 		beforeCheckpointBytes:      beforeBytes,
